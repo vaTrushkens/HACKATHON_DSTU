@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 from functools import lru_cache
+from rest_framework.exceptions import ValidationError
 
 import pandas as pd
 from django.conf import settings
@@ -25,59 +26,112 @@ log = logging.getLogger(__name__)
 FLOW_MODEL_PATH = settings.MODELS_DIR / "flow_hgb.joblib"
 
 
-@lru_cache(maxsize=1)
 def get_flow_model() -> FlowModel:
+    stamp = FLOW_MODEL_PATH.stat().st_mtime_ns if FLOW_MODEL_PATH.exists() else None
+    return _load_flow_model(stamp)
+
+
+@lru_cache(maxsize=1)
+def _load_flow_model(stamp) -> FlowModel:
     if FLOW_MODEL_PATH.exists():
-        return get_model("hgb", str(FLOW_MODEL_PATH))
+        model = get_model("hgb", str(FLOW_MODEL_PATH))
+        if model.train_info.get("feature_version") == 2:
+            return model
+        log.warning("flow model uses old features; retrain required, using seasonal_naive")
     log.info("flow model not trained yet, using seasonal_naive")
     return get_model("seasonal_naive")
 
 
 def reset_model_cache() -> None:
-    get_flow_model.cache_clear()
+    _load_flow_model.cache_clear()
 
 
 def resolve_as_of(company: Company, as_of=None) -> pd.Timestamp:
     if as_of:
-        return pd.Timestamp(as_of).normalize()
+        try:
+            result = pd.Timestamp(as_of).normalize()
+            if pd.isna(result) or result.tzinfo is not None:
+                raise ValueError()
+            return result
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValidationError({"as_of": "Укажите дату в формате ГГГГ-ММ-ДД"}) from exc
     return pd.Timestamp(company.as_of or pd.Timestamp.today()).normalize()
 
 
 def build_inputs(company: Company, as_of: pd.Timestamp, horizon: int, scenario: Scenario, min_balance: float, ops: pd.DataFrame | None = None) -> ForecastInputs:
     ops = ops if ops is not None else ops_services.ops_frame(company)
-    last_op = ops.operation_date.max() if len(ops) else as_of
-    if as_of < last_op - pd.Timedelta(days=7):
-        # прогноз «из прошлого» (демо, план-факт): паттерны ищем только по данным до as_of, без утечки будущего
-        patterns = detect_recurring(ops[ops.operation_date <= as_of], as_of)
-    else:
-        patterns = planning_services.core_patterns(company)
+    if len(ops) and as_of < ops.operation_date.max():
+        from cashflow_core.categorizer import Categorizer
+        ops = ops.copy()
+        hist = ops[ops.operation_date <= as_of]
+        cats = Categorizer().transform(hist)
+        idx = hist.index[hist.category_source != 'manual']
+        ops.loc[idx, cats.columns] = cats.loc[idx]
+    # Never reuse patterns learned from operations after the requested cutoff.
+    patterns = detect_recurring(ops[ops.operation_date <= as_of], as_of)
+    disabled = set(planning_services.RecurringPattern.objects.filter(company=company, user_disabled=True).values_list("key", flat=True))
+    patterns = [p for p in patterns if p.key not in disabled]
     end = as_of + pd.Timedelta(days=horizon)
     planned = planning_services.planned_events_frame(company, as_of, end)
-    # события из банка/счетов имеют приоритет над выявленными паттернами той же категории
-    if not planned.empty:
-        patterns = _dedupe_patterns(patterns, planned)
     return ForecastInputs(
         ops=ops, as_of=as_of, horizon_days=horizon, patterns=patterns, planned_events=planned,
         meta={"industry": company.industry, "legal_form": company.legal_form, "company_id": company.code},
         min_balance=min_balance, scenario=scenario,
+        industry_profile=industry_profile(company, as_of) if len(ops[ops.operation_date <= as_of]) and (as_of - ops[ops.operation_date <= as_of].operation_date.min()).days < 120 else None,
     )
 
 
+def industry_profile(company, as_of):
+    """Weekday factors from peers in the same dataset, using only available history."""
+    if not company.industry:
+        return None
+    from cashflow_core.categorizer.pipeline import apply_rules
+    peers = Company.objects.filter(industry=company.industry, dataset_id=company.dataset_id).exclude(pk=company.pk).order_by('pk')
+    profiles = []
+    for peer in peers:
+        frame = ops_services.ops_frame(peer, until=as_of.date())
+        if frame.empty:
+            continue
+        frame['category'] = apply_rules(frame).category
+        daily = daily_flows(frame, as_of)
+        if len(daily) < 60:
+            continue
+        ratios = {}
+        for key, col in [('dow_in', 'inflow_var'), ('dow_out', 'outflow_var')]:
+            mean = daily[col].mean()
+            ratios[key] = (daily.groupby(daily.index.dayofweek)[col].mean() / mean).to_dict() if mean > 0 else {}
+        profiles.append(ratios)
+    if not profiles:
+        return None
+    return {**{key: {day: float(sum(p[key].get(day, 1.) for p in profiles) / len(profiles)) for day in range(7)} for key in ('dow_in','dow_out')},
+            'industry': company.industry, 'peers': len(profiles), 'as_of': str(as_of.date())}
+
+
 def _dedupe_patterns(patterns, planned: pd.DataFrame):
-    bank_cats = set(planned[planned.source == "bank"].category.unique())
-    return [p for p in patterns if p.category not in bank_cats]
+    # Reconciliation happens per occurrence in the engine, not per category.
+    return patterns
 
 
 def run(company: Company, as_of=None, horizon: int | None = None, scenario: dict | None = None, min_balance=None, save: bool = True, model: FlowModel | None = None) -> dict:
     as_of = resolve_as_of(company, as_of)
     horizon = horizon or settings.FORECAST_DEFAULT_HORIZON
-    sc = Scenario.from_dict(scenario)
+    try:
+        sc = Scenario.from_dict(scenario)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValidationError({"scenario": str(exc)}) from exc
     thr = float(min_balance if min_balance is not None else company.min_balance)
     ops = ops_services.ops_frame(company)
     inp = build_inputs(company, as_of, horizon, sc, thr, ops)
-    res = run_forecast(inp, model or get_flow_model(), n_paths=settings.FORECAST_N_PATHS)
+    selected = model or get_flow_model()
+    until = getattr(selected, 'train_info', {}).get('train_until')
+    if selected.name == 'hgb' and (not until or pd.Timestamp(until) > as_of):
+        selected = get_model('seasonal_naive')
+    res = run_forecast(inp, selected, n_paths=settings.FORECAST_N_PATHS)
+    res.calculation_log[0]['last_import_report'] = ops_services.last_ingest_report(company)
     delays = counterparty_payment_delays(ops[ops.operation_date <= as_of]) if len(ops) else None
-    overdue = planning_services.overdue_events_frame(company)
+    overdue = inp.planned_events.copy()
+    if len(overdue):
+        overdue = overdue[pd.to_datetime(overdue.original_date) <= as_of]
     assessment = risk_mod.assess(res, overdue_events=overdue if len(overdue) else None, delays=delays)
     payload = {"forecast": res.to_dict(), "risk": assessment.as_dict(), "run_id": None}
     if save:
@@ -90,7 +144,7 @@ def _save_run(company: Company, res, assessment, is_baseline: bool) -> int:
     run_obj = ForecastRun.objects.create(
         company=company, as_of=res.as_of.date(), horizon_days=len(res.daily), model_name=res.model_name, is_baseline=is_baseline,
         scenario=res.scenario.as_dict(), min_balance=Decimal(str(res.min_balance)), opening_balance=Decimal(str(round(res.opening_balance, 2))),
-        components=res.components, data_quality=res.data_quality, risk=assessment.as_dict(), events=res.to_dict()["events"],
+        components=res.components, data_quality=res.data_quality, risk=assessment.as_dict(), events=res.to_dict()["events"], calculation_log=res.calculation_log,
     )
     pts = [ForecastPoint(run=run_obj, date=d.date(), p10=float(r.p10), p50=float(r.p50), p90=float(r.p90), mean=float(r["mean"]), prob_below=float(r.prob_below), det_in=float(r.det_in), det_out=float(r.det_out), stoch_in=float(r.stoch_in), stoch_out=float(r.stoch_out)) for d, r in res.daily.iterrows()]
     ForecastPoint.objects.bulk_create(pts, batch_size=500)
@@ -137,7 +191,8 @@ def plan_fact(company: Company, run_id: int | None = None, as_of=None) -> dict:
     plan = pd.DataFrame(list(run_obj.points.values("date", "p10", "p50", "p90", "det_in", "det_out", "stoch_in", "stoch_out")))
     plan["date"] = pd.to_datetime(plan["date"])
     plan = plan.set_index("date")
-    actual = daily_flows(ops_frame, last_fact)
+    from cashflow_core.forecast.series import actual_daily
+    actual = actual_daily(ops_frame, last_fact)
     actual_cal = actual.reindex(pd.date_range(plan.index.min(), min(plan.index.max(), last_fact)))
     actual_cal[["inflow", "outflow"]] = actual_cal[["inflow", "outflow"]].fillna(0.0)
     actual_cal["balance"] = actual_cal.balance.ffill()
@@ -157,8 +212,8 @@ def plan_fact(company: Company, run_id: int | None = None, as_of=None) -> dict:
     daily_cmp["date"] = daily_cmp["date"].dt.strftime("%Y-%m-%d")
     return {
         "run": {"id": run_obj.id, "as_of": str(run_obj.as_of), "horizon_days": run_obj.horizon_days, "model": run_obj.model_name, "risk": run_obj.risk, "created_at": run_obj.created_at.isoformat()},
-        "weeks": weeks.round(2).to_dict(orient="records") if not weeks.empty else [],
-        "daily": daily_cmp.round(2).where(pd.notna(daily_cmp), None).to_dict(orient="records"),
+        "weeks": weeks.round(2).astype(object).where(pd.notna(weeks), None).to_dict(orient="records") if not weeks.empty else [],
+        "daily": daily_cmp.round(2).astype(object).where(pd.notna(daily_cmp), None).to_dict(orient="records"),
         "events": ev_status,
         "fact_until": last_fact.strftime("%Y-%m-%d"),
     }

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 
 import pandas as pd
+import math
 
 
 @dataclass
@@ -24,7 +25,35 @@ class Scenario:
     def from_dict(cls, d: dict | None) -> "Scenario":
         if not d:
             return cls()
+        if not isinstance(d, dict):
+            raise ValueError("Сценарий должен быть объектом")
         allowed = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        for key in ('revenue_change_pct', 'fixed_cost_change_pct'):
+            value = float(allowed.get(key, 0))
+            if not math.isfinite(value) or not -100 <= value <= 1000:
+                raise ValueError(f"{key}: допустимо от −100 до 1000%")
+            allowed[key] = value
+        delay = float(allowed.get('delay_client_days', 0))
+        if not math.isfinite(delay) or not delay.is_integer() or not 0 <= delay <= 365:
+            raise ValueError("Задержка должна быть целым числом от 0 до 365")
+        allowed['delay_client_days'] = int(delay)
+        for key in ('extra_expenses', 'extra_incomes'):
+            items = allowed.get(key, [])
+            if not isinstance(items, list) or len(items) > 100:
+                raise ValueError("Не более 100 дополнительных событий")
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError("Событие должно быть объектом")
+                value = float(item['amount'])
+                date = pd.Timestamp(item['date'])
+                if not math.isfinite(value) or value <= 0 or value > 1e15 or pd.isna(date) or date.tzinfo is not None:
+                    raise ValueError("Укажите положительную сумму и корректную дату события")
+                from ..categories import BY_CODE
+                if item.get('category') and (item['category'] not in BY_CODE or BY_CODE[item['category']].direction != ('in' if key == 'extra_incomes' else 'out')):
+                    raise ValueError("Категория события не соответствует направлению")
+                item['amount'] = value
+        if not isinstance(allowed.get('exclude_event_keys', []), list):
+            raise ValueError("exclude_event_keys должен быть списком")
         return cls(**allowed)
 
     def is_base(self) -> bool:
@@ -38,6 +67,9 @@ def apply_to_events(events: pd.DataFrame, sc: Scenario, as_of: pd.Timestamp, end
         ev = pd.DataFrame(columns=["date", "amount", "direction", "category", "label", "counterparty_name", "source", "confidence", "pattern_key"])
     if sc.exclude_event_keys:
         ev = ev[~ev.pattern_key.astype(str).isin(sc.exclude_event_keys)]
+    if sc.revenue_change_pct:
+        mask = (ev.direction == 'Поступление') & ev.category.isin(['REV_CLIENTS', 'REV_MARKETPLACE', 'REV_ACQUIRING'])
+        ev.loc[mask, 'amount'] *= 1 + sc.revenue_change_pct / 100
     if sc.fixed_cost_change_pct:
         mask = (ev.direction == "Списание") & ev.category.isin(["RENT", "UTILITIES", "SERVICES", "SALARY", "CONTRACTORS", "LOAN_OUT", "BANK_FEES"])
         ev.loc[mask, "amount"] = ev.loc[mask, "amount"] * (1 + sc.fixed_cost_change_pct / 100)

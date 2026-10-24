@@ -2,7 +2,7 @@ import { chartTooltip } from '../chartTheme'
 import useCompactChart from '../hooks/useCompactChart'
 import ReactECharts from 'echarts-for-react'
 import type { Risk } from '../types'
-import { fmtMoney, fmtShort } from '../format'
+import { escapeHtml, fmtMoney, fmtShort } from '../format'
 
 const css = (n: string, f: string) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f
 
@@ -23,12 +23,12 @@ export default function Waterfall({ rows }: { rows: Risk['waterfall'] }) {
   })
   const option = {
     grid: { left: 8, right: compact ? 44 : 60, top: 8, bottom: 8, containLabel: true },
-    tooltip: { ...chartTooltip, trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (p: any[]) => { const i = p[0].dataIndex; const r = rows[i]; return `<b>${r.label}</b><br/>${fmtMoney(r.amount)}${r.note ? `<br/><span style="color:${css('--muted', '#898781')}">${r.note}</span>` : ''}` } },
+    tooltip: { ...chartTooltip, trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (p: any[]) => { const i = p[0].dataIndex; const r = rows[i]; return `<b>${escapeHtml(r.label)}</b><br/>${fmtMoney(r.amount)}${r.note ? `<br/><span style="color:${css('--muted', '#898781')}">${escapeHtml(r.note)}</span>` : ''}` } },
     xAxis: { type: 'value', axisLabel: { hideOverlap: true, formatter: (v: number) => fmtShort(v), color: css('--muted', '#898781') }, splitLine: { lineStyle: { color: css('--grid', '#e1e0d9') } } },
     yAxis: { type: 'category', data: labels, inverse: true, axisLabel: { color: css('--text-2', '#52514e'), fontSize: compact ? 10 : 12, width: compact ? 90 : 190, overflow: 'truncate' }, axisLine: { show: false }, axisTick: { show: false } },
     series: [
-      { type: 'bar', stack: 'w', data: base, itemStyle: { color: 'transparent' }, silent: true, tooltip: { show: false }, barWidth: 16 },
-      { type: 'bar', stack: 'w', data: vals.map((v, i) => ({ value: v, itemStyle: { color: colors[i], borderRadius: 4 } })), barWidth: 16, label: { show: true, position: 'right', color: css('--text-2', '#52514e'), fontSize: 11, formatter: (p: any) => fmtShort(rows[p.dataIndex].amount) } },
+      { type: 'bar', stack: 'w', stackStrategy: 'all', data: base, itemStyle: { color: 'transparent' }, silent: true, tooltip: { show: false }, barWidth: 16 },
+      { type: 'bar', stack: 'w', stackStrategy: 'all', data: vals.map((v, i) => ({ value: v, itemStyle: { color: colors[i], borderRadius: 4 } })), barWidth: 16, label: { show: true, position: 'right', color: css('--text-2', '#52514e'), fontSize: 11, formatter: (p: any) => fmtShort(rows[p.dataIndex].amount) } },
     ],
   }
   return <ReactECharts option={option} style={{ height: 36 * rows.length + 30 }} notMerge />

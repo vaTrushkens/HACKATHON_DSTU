@@ -114,7 +114,7 @@ BANK_API_TOKEN = os.getenv("BANK_API_TOKEN", "")
 # ---- LLM-ассистент: локальная модель через Ollama (чат на сайте и Telegram-бот) ----
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434")
-LLM_MODEL = os.getenv("LLM_MODEL", "gemma4:e4b")
+LLM_MODEL = os.getenv("LLM_MODEL") or "gemma4:e4b"
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))  # CPU-инференс: ответ с инструментами может занять десятки секунд
 LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "8192"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "260"))  # предел длины ответа: 2–4 предложения, без «простыней»

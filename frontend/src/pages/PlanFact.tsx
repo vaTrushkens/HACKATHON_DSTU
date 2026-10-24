@@ -40,8 +40,8 @@ export default function PlanFact() {
     xAxis: { type: 'time', axisLabel: { color: muted, hideOverlap: true }, axisLine: { lineStyle: { color: grid } } },
     yAxis: { type: 'value', axisLabel: { color: muted, hideOverlap: true, formatter: (v: number) => fmtShort(v) }, splitLine: { lineStyle: { color: grid } } },
     series: [
-      { name: 'p10', type: 'line', stack: 'b', data: daily.map((d) => [d.date, d.p10]), showSymbol: false, lineStyle: { opacity: 0 }, silent: true },
-      { name: 'коридор', type: 'line', stack: 'b', data: daily.map((d) => [d.date, d.p90 - d.p10]), showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: blue, opacity: 0.14 }, silent: true },
+      { name: 'p10', type: 'line', stack: 'b', stackStrategy: 'all', data: daily.map((d) => [d.date, d.p10]), showSymbol: false, lineStyle: { opacity: 0 }, silent: true },
+      { name: 'коридор', type: 'line', stack: 'b', stackStrategy: 'all', data: daily.map((d) => [d.date, d.p90 - d.p10]), showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: blue, opacity: 0.14 }, silent: true },
       { name: 'Прогноз (медиана)', type: 'line', data: daily.map((d) => [d.date, d.p50]), showSymbol: false, lineStyle: { color: blue, width: 2.5 }, itemStyle: { color: blue } },
       { name: 'Факт', type: 'line', data: daily.filter((d) => d.balance !== null).map((d) => [d.date, d.balance]), showSymbol: false, lineStyle: { color: ink, width: 2 }, itemStyle: { color: ink } },
     ],
@@ -49,7 +49,7 @@ export default function PlanFact() {
   return (
     <>
       <div className="page-head">
-        <div><h1>План-факт</h1><p className="subtitle">Сохранённый прогноз против того, что произошло. Расхождения подсвечены; ожидаемые платежи, которые не пришли в срок, помечаются и прогноз пересчитывается без них.</p></div>
+        <div><h1>План-факт</h1><p className="subtitle">Сохранённый прогноз против того, что произошло. Просроченные расходы сохраняются как долг; просроченные поступления учитываются с пониженной вероятностью и неопределённым сроком.</p></div>
         <label className="field">Снапшот прогноза<Select value={runId} onValueChange={(value) => setRunId(value ? Number(value) : '')}><option value="">автоматически (самый свежий с ≥ 7 дн. факта)</option>{runs.map((r) => <option key={r.id} value={r.id}>от {fmtDate(r.as_of)} · {r.horizon_days} дн. · {r.risk?.summary}</option>)}</Select></label>
       </div>
       {data?.detail && <div className="card">{data.detail}<div className="small muted" style={{ marginTop: 6 }}>Подсказка для демо: на «Обзоре» поставьте дату «сегодня» на месяц раньше последней операции и нажмите «Применить» — снапшот сохранится, а факт за этот месяц станет сравнением.</div></div>}

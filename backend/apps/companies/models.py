@@ -3,6 +3,8 @@ from django.db import models
 
 class Company(models.Model):
     code = models.CharField("Идентификатор", max_length=16, unique=True)  # C001…
+    external_code = models.CharField(max_length=128, blank=True)
+    dataset_id = models.UUIDField(null=True, blank=True, db_index=True)
     name = models.CharField("Название", max_length=255)
     inn = models.CharField("ИНН", max_length=12, blank=True)
     legal_form = models.CharField("Форма", max_length=16, blank=True)  # ООО / ИП

@@ -12,7 +12,7 @@ from django.db import transaction
 
 from apps.companies.models import Company
 from cashflow_core import ingest
-from cashflow_core.categories import LABELS
+from cashflow_core.categories import LABELS, BY_CODE
 from cashflow_core.categorizer import Categorizer
 from cashflow_core.categorizer.ml import MLCategorizer
 
@@ -59,18 +59,43 @@ def ops_frame(company: Company, until=None) -> pd.DataFrame:
 def import_operations(company: Company, raw: pd.DataFrame, categorizer: Categorizer | None = None, source: str = "statement") -> ingest.IngestReport:
     """Очищает, категоризирует и сохраняет операции. Уже загруженные (по operation_id) пропускаются —
     так выписку можно догружать инкрементально."""
+    # Reject mixed or unrelated companies before touching stored operations.
+    if "company_id" in raw.columns:
+        codes = set(raw.company_id.dropna().astype(str).str.strip()) - {""}
+        expected = {company.code, getattr(company, "external_code", "")} - {""}
+        if len(codes) > 1 or (codes and not codes.issubset(expected)):
+            raise ValueError("Файл относится к другой компании или содержит несколько компаний. Используйте «Загрузить новый набор».")
+    Company.objects.select_for_update().get(pk=company.pk)
+    raw = raw.copy()
+    raw['_balance_missing'] = pd.to_numeric(raw['balance_eod'], errors='coerce').isna() if 'balance_eod' in raw else True
     df, report = ingest.clean_operations(raw)
     if df.empty:
         IngestLog.objects.create(company=company, source=source, rows_total=report.rows_total, rows_new=0, report=report.as_dict())
         return report
-    existing = set(Operation.objects.filter(company=company).values_list("operation_id", flat=True))
+    existing = {(str(d), op_id): (float(amount), direction, inn, purpose) for d, op_id, amount, direction, inn, purpose in Operation.objects.filter(company=company).values_list("operation_date", "operation_id", "amount", "direction", "counterparty_inn", "payment_purpose")}
     df["operation_id"] = df["operation_id"].astype(str)
     if existing:
-        # для файлов без стабильных id дополнительно отсекаем дубли по содержимому
-        dup_content = set(Operation.objects.filter(company=company).values_list("operation_date", "amount", "direction", "payment_purpose"))
-        content_key = list(zip(df.operation_date.dt.date, df.amount.map(lambda a: Decimal(str(round(a, 2)))), df.direction, df.payment_purpose))
-        mask_new = ~df.operation_id.isin(existing).values & np.array([k not in dup_content for k in content_key], dtype=bool)
-        df = df[mask_new]
+        keep = []
+        for r in df.itertuples():
+            old = existing.get((str(r.operation_date.date()), r.operation_id))
+            if old is not None and old != (float(r.amount), r.direction, r.counterparty_inn, r.payment_purpose):
+                raise ValueError("Ранее загруженная операция с тем же ID и датой отличается от файла")
+            keep.append(old is None)
+        report.rows_duplicates += len(keep) - sum(keep)
+        df = df.loc[keep]
+    if len(df) and df['_balance_missing'].any() and existing:
+        # Incremental statements must inherit known balances from earlier imports.
+        history = ops_frame(company)
+        new = df.copy()
+        new.loc[new['_balance_missing'], 'balance_eod'] = np.nan
+        joined = pd.concat([history, new], ignore_index=True).sort_values('operation_date')
+        if (joined.groupby('operation_date').balance_eod.nunique() > 1).any():
+            raise ValueError('Остаток в файле противоречит ранее загруженному остатку того же дня')
+        restored = ingest._restore_balances(joined).groupby('operation_date').balance_eod.first()
+        df = df.copy()
+        df['balance_eod'] = df.operation_date.map(restored)
+        report.warnings = [w for w in report.warnings if not w.startswith('Все остатки отсутствуют')]
+        report.warnings.append('Пропущенные остатки восстановлены с учётом ранее загруженной истории')
     cat = categorizer or get_categorizer()
     cats = cat.transform(df) if len(df) else None
     objs = []
@@ -134,16 +159,16 @@ def recategorize(company: Company, categorizer: Categorizer | None = None, keep_
         return 0
     cat = categorizer or get_categorizer()
     cats = cat.transform(df)
-    manual = set(Operation.objects.filter(company=company, category_source="manual").values_list("operation_id", flat=True)) if keep_manual else set()
+    manual = set(Operation.objects.filter(company=company, category_source="manual").values_list("operation_date", "operation_id")) if keep_manual else set()
     objs = []
-    for op_id, (code, conf, src) in zip(df.operation_id, cats[["category", "category_confidence", "category_source"]].itertuples(index=False)):
-        if op_id in manual:
+    for (date, op_id), (code, conf, src) in zip(zip(df.operation_date.dt.date, df.operation_id), cats[["category", "category_confidence", "category_source"]].itertuples(index=False)):
+        if (date, op_id) in manual:
             continue
-        objs.append(Operation(company=company, operation_id=op_id, category=code, category_confidence=float(conf), category_source=src))
+        objs.append(Operation(company=company, operation_date=date, operation_id=op_id, category=code, category_confidence=float(conf), category_source=src))
     # bulk_update требует pk — подтягиваем
-    pk_map = dict(Operation.objects.filter(company=company).values_list("operation_id", "id"))
+    pk_map = {(d, op): pk for d, op, pk in Operation.objects.filter(company=company).values_list("operation_date", "operation_id", "id")}
     for o in objs:
-        o.id = pk_map[o.operation_id]
+        o.id = pk_map[(o.operation_date, o.operation_id)]
     Operation.objects.bulk_update(objs, ["category", "category_confidence", "category_source"], batch_size=2000)
     return len(objs)
 
@@ -151,6 +176,8 @@ def recategorize(company: Company, categorizer: Categorizer | None = None, keep_
 def set_manual_category(op: Operation, category: str) -> Operation:
     if category not in LABELS:
         raise ValueError("unknown category")
+    if BY_CODE[category].direction != ("in" if op.direction == "Поступление" else "out"):
+        raise ValueError("Категория не соответствует направлению операции")
     op.category = category
     op.category_confidence = 1.0
     op.category_source = "manual"

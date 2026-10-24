@@ -201,7 +201,7 @@ def test_short_history_falls_back_to_profile():
     ops = _synthetic_ops(months=1)
     ops = pd.concat([ops, Categorizer().transform(ops)], axis=1)
     res = _forecast(ops, ops.operation_date.max())
-    assert res.model_name == "industry_profile"
+    assert res.model_name == "short_history_mean"
     assert res.data_quality["level"] == "low"
 
 

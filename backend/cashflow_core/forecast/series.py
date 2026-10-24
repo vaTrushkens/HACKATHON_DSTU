@@ -61,6 +61,19 @@ def balance_as_of(ops: pd.DataFrame, as_of: pd.Timestamp) -> float:
     return float(df[df.operation_date == last].balance_eod.iloc[0])
 
 
+def actual_daily(ops: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+    """Calendar-day facts: never move weekend operations to a different date."""
+    df = ops[ops.operation_date <= as_of]
+    if df.empty:
+        return pd.DataFrame(columns=['inflow', 'outflow', 'balance'], index=pd.DatetimeIndex([], name='date'))
+    idx = pd.date_range(df.operation_date.min(), as_of, name='date')
+    out = pd.DataFrame(index=idx)
+    for col, direction in [('inflow', 'Поступление'), ('outflow', 'Списание')]:
+        out[col] = df[df.direction == direction].groupby('operation_date').amount.sum().reindex(idx).fillna(0.)
+    out['balance'] = df.groupby('operation_date').balance_eod.first().reindex(idx).ffill()
+    return out
+
+
 def seasonal_month_factors(daily: pd.DataFrame, col: str) -> dict[int, float]:
     """Отношение среднего дневного потока месяца к среднему за год (если истории ≥ 12 месяцев)."""
     if daily.empty or (daily.index.max() - daily.index.min()).days < 360:

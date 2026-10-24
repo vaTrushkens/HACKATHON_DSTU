@@ -65,9 +65,11 @@ def assess(res: ForecastResult, overdue_events: pd.DataFrame | None = None, dela
     # дефицит: сколько не хватит в худшей точке траектории
     min_p50 = float(daily.p50.min())
     min_p10 = float(daily.p10.min())
-    deficit_p50 = max(thr - min_p50, 0.0)
-    deficit_p10 = max(thr - min_p10, 0.0)
-    runway = int((daily.p50 >= thr).values.argmin()) if (daily.p50 < thr).any() else None
+    # Distribution of worst balance per path, not minimum of pointwise quantiles.
+    path_min = paths.min(axis=1)
+    deficit_p50 = max(thr - float(np.percentile(path_min, 50)), 0.0)
+    deficit_p10 = max(thr - float(np.percentile(path_min, 10)), 0.0)
+    runway = int((daily.index[(daily.p50 < thr)][0] - res.as_of).days) if (daily.p50 < thr).any() else None
 
     if prob_any >= P_HIGH:
         level = "high"
@@ -134,6 +136,10 @@ def _waterfall(res: ForecastResult, until: pd.Timestamp) -> list[dict]:
             label = LABELS.get(g.category, g.category) if g.n > 1 else g.label
             rows.append({"label": label, "amount": round(float(g.amount), 2), "kind": "event", "category": g.category, "date": _s(g.first_date), "count": int(g.n)})
     rows.append({"label": "Операционные расходы (закупки, реклама и пр.)", "amount": -round(float(d.stoch_out.sum()), 2), "kind": "stoch_out", "note": "оценка модели"})
+    # Quantiles are not additive. Reconcile the displayed contributions to p50 explicitly.
+    subtotal = sum(row['amount'] for row in rows)
+    adjustment = round(float(d.p50.iloc[-1]) - subtotal, 2)
+    rows.append({"label": "Поправка от суммы средних к медиане", "amount": adjustment, "kind": "uncertainty"})
     rows.append({"label": f"Остаток на {fmt_date(until)} (медиана)", "amount": round(float(d.p50.iloc[-1]), 2), "kind": "end"})
     return rows
 
@@ -158,9 +164,10 @@ def _explain(res, level, prob, gap_date, gap_date_p10, deficit_p50, deficit_p10,
         (f"операционные расходы ({fmt_money(-w['amount'])}, оценка по истории)" if w["kind"] == "stoch_out" else f"{w['label'].lower()} ({fmt_money(-w['amount'])})") for w in big_outs
     )
     if gap_date is not None:
-        head = f"С вероятностью {prob:.0%} к {fmt_date(gap_date)} остаток опустится {thr_txt}: не хватит около {fmt_money(deficit_p50)}, в плохом случае — до {fmt_money(deficit_p10)}."
+        head = f"Оценка вероятности хотя бы одного разрыва за {len(res.daily)} дней — {prob:.0%}. Медианный остаток опускается {thr_txt} {fmt_date(gap_date)}; пиковая нехватка по траекториям — около {fmt_money(deficit_p50)}, в плохом случае — до {fmt_money(deficit_p10)}."
     else:
-        head = f"Разрыв не является базовым сценарием, но в неблагоприятном случае (вероятность {prob:.0%}) остаток уйдёт {thr_txt} около {fmt_date(gap_date_p10)}; нехватка может достичь {fmt_money(deficit_p10)}."
+        timing = f" Неблагоприятный дневной сценарий пересекает порог {fmt_date(gap_date_p10)}." if gap_date_p10 is not None else " Дата разрыва различается между траекториями."
+        head = f"Оценка вероятности хотя бы одного разрыва за {len(res.daily)} дней — {prob:.0%}, хотя медианный остаток по дням выше порога.{timing} Пиковая нехватка в плохом случае — до {fmt_money(deficit_p10)}."
     why = f" Основные списания до этой даты: {causes}." if causes else ""
     stoch_in = next((w for w in waterfall if w["kind"] == "stoch_in"), None)
     inflow_txt = f" Ожидаемые поступления за период — около {fmt_money(stoch_in['amount'])}, этого недостаточно, чтобы покрыть все платежи." if stoch_in and level != "low" else ""
@@ -174,7 +181,7 @@ def _summary(level, prob, gap_date, gap_date_p10, deficit_p50, deficit_p10, res)
         return f"Остаток уже ниже порога на {fmt_money(res.min_balance - res.opening_balance)}{tail}"
     if level == "high" and gap_date is not None:
         return f"Через {(pd.Timestamp(gap_date) - res.as_of).days} дн. ({fmt_date(gap_date)}) может не хватить {fmt_money(deficit_p50)}"
-    if level == "medium":
+    if level in ("medium", "high"):
         d = gap_date or gap_date_p10
         return f"Риск нехватки {prob:.0%}" + (f", ближе к {fmt_date(d)}" if d is not None else "")
     return "Денег хватает на весь горизонт прогноза"
@@ -236,7 +243,11 @@ def _alerts(res, level, prob, gap_date, gap_date_p10, deficit_p50, deficit_p10, 
             alerts.append(Alert("info", "big_payment", f"Крупный платёж {fmt_date(e.date)}: {e.label}", f"{fmt_money(e.amount)} — это {e.amount / max(res.opening_balance, 1):.0%} текущего остатка.", _s(e.date), float(e.amount), None, {"source": e.source}))
     if overdue is not None and not overdue.empty:
         for o in overdue.head(5).itertuples():
-            alerts.append(Alert("medium", "overdue_income", f"Не пришла оплата: {o.counterparty_name or o.label}", f"Ожидалось {fmt_money(o.amount)} {fmt_date(o.date)}. Прогноз пересчитан без этого поступления.", _s(o.date), float(o.amount), None))
+            incoming = o.direction == "Поступление"
+            title = "Не пришла оплата" if incoming else "Не исполнен обязательный платёж"
+            note = "Поступление перенесено с пониженной вероятностью." if incoming else "Долг сохранён в прогнозе на ближайший день."
+            due = getattr(o, 'original_date', o.date)
+            alerts.append(Alert("medium", "overdue_income" if incoming else "overdue_expense", f"{title}: {o.counterparty_name or o.label}", f"Срок {fmt_date(due)}, сумма {fmt_money(o.amount)}. {note}", _s(due), float(o.amount), None))
     for note in res.data_quality.get("notes", []):
         alerts.append(Alert("info", "data_quality", "Качество данных", note))
     return alerts

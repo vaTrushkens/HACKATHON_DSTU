@@ -167,12 +167,13 @@ def project(patterns: list[RecurringPattern], start: pd.Timestamp, end: pd.Times
                     "category": p.category,
                     "label": p.label,
                     "counterparty_name": p.counterparty_name,
+                    "counterparty_inn": p.counterparty_inn,
                     "source": "recurring",
                     "confidence": p.confidence,
                     "pattern_key": p.key,
                 }
             )
-    cols = ["date", "amount", "direction", "category", "label", "counterparty_name", "source", "confidence", "pattern_key"]
+    cols = ["date", "amount", "direction", "category", "label", "counterparty_name", "counterparty_inn", "source", "confidence", "pattern_key"]
     return pd.DataFrame(rows, columns=cols)
 
 

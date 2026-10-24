@@ -280,8 +280,10 @@ form .range-field { padding: 14px; margin: 8px 0; border-radius: 6px; background
 @media (max-width: 600px) {
   .header-inner, .nav { margin-left: 20px; margin-right: 20px; }
   .header-inner { flex-wrap: wrap; gap: 12px; padding: 18px 0 10px; }
-  .header-account { width: 100%; margin: 0; gap: 12px; }
-  .header-account .company-select { flex: 1; width: 0; }
+  .header-account { width: 100%; margin: 0; gap: 8px; flex-wrap: wrap; }
+  .header-account .company-select { flex: 1 1 100%; width: 100%; }
+  .header-account .theme-select { flex: 1; min-width: 120px; }
+  .header-account > button { padding: 8px 10px; }
   .header-account .select-trigger { padding-left: 12px; }
   .nav { gap: 24px; }
   .main { padding: 20px 20px 40px; }

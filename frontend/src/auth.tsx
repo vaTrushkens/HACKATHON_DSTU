@@ -15,6 +15,17 @@ type Ctx = {
 
 const AuthCtx = createContext<Ctx>(null as any)
 
+async function loadCompanies(): Promise<Company[]> {
+  const all: Company[] = []
+  let page = 1
+  while (true) {
+    const data = await get<any>('/companies/', { page_size: 200, page })
+    all.push(...(data.results ?? data))
+    if (!data.next) return all
+    page += 1
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [companies, setCompanies] = useState<Company[]>([])
@@ -28,8 +39,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const me = await get<User>('/auth/me/')
       setUser(me)
-      const list = await get<any>('/companies/', { page_size: 200 })
-      const items: Company[] = list.results ?? list
+      const items = await loadCompanies()
       setCompanies(items)
       setCompanyId((cur) => (cur && items.some((c) => c.id === cur) ? cur : items[0]?.id ?? null))
     } catch { tokens.clear() } finally { setLoading(false) }
@@ -41,7 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     user, loading, companies,
     company: companies.find((c) => c.id === companyId) ?? null,
     selectCompany: (id) => { setCompanyId(id); try { localStorage.setItem('cf_company', String(id)) } catch { /* noop */ } },
-    refreshCompanies: async () => { const list = await get<any>('/companies/', { page_size: 200 }); setCompanies(list.results ?? list) },
+    refreshCompanies: async () => { setCompanies(await loadCompanies()) },
     login: async (u, p) => { await apiLogin(u, p); setLoading(true); await load() },
     logout: () => { tokens.clear(); setUser(null); setCompanies([]) },
   }), [user, loading, companies, companyId, load])

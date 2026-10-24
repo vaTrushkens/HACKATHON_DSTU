@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 import pandas as pd
-from django.core.management.base import BaseCommand
-from sklearn.metrics import accuracy_score, f1_score
+import hashlib
+import json
+from pathlib import Path
+from django.core.management.base import BaseCommand, CommandError
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix
 
 from apps.forecasting.models import BacktestResult
 from apps.operations import services as ops_services
@@ -24,25 +27,38 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--sample", required=True)
         parser.add_argument("--labels", required=True)
+        parser.add_argument("--output", help="Путь к JSON-отчёту")
 
     def handle(self, *args, **opts):
         sample = pd.read_csv(opts["sample"], sep=";", encoding="utf-8-sig", dtype={"counterparty_inn": str, "id": int}).fillna("")
         labels = pd.read_csv(opts["labels"], sep=";", encoding="utf-8-sig")
-        df = sample.merge(labels, on="n")
+        try:
+            df = sample.merge(labels, on="n", validate='one_to_one')
+        except pd.errors.MergeError as exc:
+            raise CommandError('Повторяются номера строк в разметке') from exc
+        if len(df) != len(sample) or df.empty or not df.label.isin(LABELS).all():
+            raise CommandError('Нужна корректная категория для каждой строки выборки')
         y = df["label"]
 
         # для распространения по контрагенту нужна вся история компании — берём операции тех же компаний
         company_ids = df.company_id.unique().tolist()
-        full = pd.DataFrame(list(Operation.objects.filter(company_id__in=company_ids).values("id", "direction", "counterparty_inn", "counterparty_name", "payment_purpose")))
+        full = pd.DataFrame(list(Operation.objects.filter(company_id__in=company_ids).values("id", "company_id", "direction", "counterparty_inn", "counterparty_name", "payment_purpose")))
+        if full.empty:
+            raise CommandError('Компании выборки отсутствуют в этой базе')
         full["counterparty_inn"] = full["counterparty_inn"].fillna("")
         full["payment_purpose"] = full["payment_purpose"].fillna("")
         idx = full.set_index("id").index
         pos = idx.get_indexer(df["id"])
+        if (pos < 0).any():
+            raise CommandError('ID выборки отсутствуют в этой базе. Оценка остановлена вместо подстановки чужих строк.')
+        for col in ('company_id','direction','counterparty_inn','counterparty_name','payment_purpose'):
+            if col in df and not (df[col].fillna('').astype(str).values == full.iloc[pos][col].fillna('').astype(str).values).all():
+                raise CommandError(f'Выборка не соответствует текущим операциям: {col}')
 
         rules = apply_rules(full)
-        prop = propagate_by_counterparty(full, rules)
+        prop = pd.concat([propagate_by_counterparty(group, rules.loc[group.index]) for _, group in full.groupby('company_id')]).sort_index()
         cat = ops_services.get_categorizer()
-        pipeline = cat.transform(full)
+        pipeline = pd.concat([cat.transform(group) for _, group in full.groupby('company_id')]).sort_index()
         has_ml = bool(cat.ml and cat.ml.models)
 
         results = {}
@@ -52,6 +68,10 @@ class Command(BaseCommand):
             results[name] = {
                 "accuracy": round(float(accuracy_score(y, p)), 4),
                 "macro_f1": round(float(f1_score(y, p, average="macro")), 4),
+                "macro_precision": round(float(precision_score(y,p,average='macro',zero_division=0)),4),
+                "macro_recall": round(float(recall_score(y,p,average='macro',zero_division=0)),4),
+                "confusion_labels": sorted(set(y) | set(p)),
+                "confusion_matrix": confusion_matrix(y,p,labels=sorted(set(y) | set(p))).tolist(),
                 "weighted_f1": round(float(f1_score(y, p, average="weighted")), 4),
                 "errors": int((y.values != p).sum()),
             }
@@ -68,12 +88,15 @@ class Command(BaseCommand):
                 results["per_class"] = per_class
         results["n"] = int(len(df))
         results["has_ml"] = has_ml
-        results["sampling"] = "300 операций: 120 из «сложных» (слабое правило, пустое назначение, прочее) + 60 поступлений + 120 списаний случайно"
+        results["sampling"] = f"{len(df)} размеченных операций; распространение категорий отдельно по каждой компании"
+        results['independent_holdout'] = False
+        results['note'] = 'Независимость этой выборки от настройки правил и обучения не подтверждена'
+        results['sample_sha256'] = hashlib.sha256(Path(opts['sample']).read_bytes()).hexdigest()
+        results['labels_sha256'] = hashlib.sha256(Path(opts['labels']).read_bytes()).hexdigest()
 
-        rec = BacktestResult.objects.first()
-        if rec:
-            rec.categorizer_metrics = {**rec.categorizer_metrics, "manual": results}
-            rec.save(update_fields=["categorizer_metrics"])
+        BacktestResult.objects.create(name='categorization_diagnostics', categorizer_metrics={'manual':results}, config={'kind':'categorization_diagnostics'})
+        if opts['output']:
+            Path(opts['output']).write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')
         for name in variants:
             r = results[name]
             self.stdout.write(f"{name:20s} acc={r['accuracy']:.3f} macroF1={r['macro_f1']:.3f} errors={r['errors']}")

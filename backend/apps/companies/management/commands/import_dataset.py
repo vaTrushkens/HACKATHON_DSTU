@@ -42,7 +42,7 @@ class Command(BaseCommand):
         if created:
             user.set_password(opts["demo_password"])
             user.save()
-            self.stdout.write(f"Создан пользователь {opts['demo_user']} / {opts['demo_password']}")
+            self.stdout.write("Создан пользователь демо. Пароль взят из параметров команды и не выводится.")
 
         for row in comp.itertuples():
             if only and row.company_id not in only:

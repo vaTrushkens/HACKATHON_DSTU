@@ -28,3 +28,4 @@ export const SOURCE_LABELS: Record<string, string> = {
 export const MODE_LABELS: Record<string, [string, string]> = { api: ['API подключён', 'good'], derived: ['восстановлено из выписки', 'info'], mock: ['не подключено — нет ключа', 'medium'], file: ['импорт файла', 'info'], active: ['активно', 'good'] }
 export const sourceLabel = (s: string) => SOURCE_LABELS[s] ?? s
 export const PERIOD_LABELS: Record<string, string> = { weekly: 'еженедельно', biweekly: 'раз в 2 недели', monthly: 'ежемесячно', quarterly: 'ежеквартально' }
+export const escapeHtml = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)

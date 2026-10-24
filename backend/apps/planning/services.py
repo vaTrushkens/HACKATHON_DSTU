@@ -23,7 +23,7 @@ from .models import CounterpartyCheck, IntegrationConfig, PlannedEvent, Recurrin
 CHECK_TTL = pd.Timedelta(days=30)
 
 log = logging.getLogger(__name__)
-EVENT_COLS = ["date", "amount", "direction", "category", "label", "counterparty_name", "source", "confidence", "pattern_key", "probability", "timing_std_days"]
+EVENT_COLS = ["date", "amount", "direction", "category", "label", "counterparty_name", "counterparty_inn", "source", "confidence", "pattern_key", "probability", "timing_std_days", "external_ref", "obligation_key", "original_date"]
 
 
 @transaction.atomic
@@ -69,24 +69,27 @@ def core_patterns(company: Company) -> list[CorePattern]:
 
 
 def planned_events_frame(company: Company, as_of: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Ожидаемые события для движка прогноза (только не исполненные и не отменённые)."""
-    qs = PlannedEvent.objects.filter(company=company, status__in=["expected", "overdue"], date__gt=as_of.date(), date__lte=end.date())
+    """Reconstruct unpaid obligations as of the cutoff without mutating present status."""
+    qs = list(PlannedEvent.objects.filter(company=company, date__lte=end.date()).exclude(status="cancelled"))
+    if not qs:
+        return pd.DataFrame(columns=EVENT_COLS)
+    expected = pd.DataFrame([{"id": e.id, "date": pd.Timestamp(e.date), "amount": float(e.amount), "direction": e.direction, "category": e.category, "counterparty_inn": e.counterparty_inn, "counterparty_name": e.counterparty_name} for e in qs])
+    matched = planfact.match_events(expected, ops_services.ops_frame(company, until=as_of.date()), as_of).set_index("id")
     rows = []
     for e in qs:
-        rows.append(
-            {
-                "date": pd.Timestamp(e.date), "amount": float(e.amount), "direction": e.direction, "category": e.category, "label": e.label, "counterparty_name": e.counterparty_name,
-                "source": e.source, "confidence": e.probability, "pattern_key": f"event:{e.id}", "probability": e.probability, "timing_std_days": e.timing_std_days,
-            }
-        )
-    # просроченные ожидаемые поступления переносим «на завтра» с пониженной вероятностью: деньги ещё могут прийти
-    for e in PlannedEvent.objects.filter(company=company, status="overdue", date__lte=as_of.date(), direction="Поступление"):
-        rows.append(
-            {
-                "date": as_of + pd.Timedelta(days=5), "amount": float(e.amount), "direction": e.direction, "category": e.category, "label": e.label + " (просрочено)", "counterparty_name": e.counterparty_name,
-                "source": e.source, "confidence": 0.5, "pattern_key": f"event:{e.id}", "probability": min(e.probability, 0.5), "timing_std_days": max(e.timing_std_days, 5.0),
-            }
-        )
+        if matched.loc[e.id, "status"] == "matched":
+            continue
+        overdue = pd.Timestamp(e.date) <= as_of
+        incoming = e.direction == "Поступление"
+        date = as_of + pd.Timedelta(days=5 if incoming else 1) if overdue else pd.Timestamp(e.date)
+        if date > end:
+            continue
+        rows.append({"date": date, "original_date": str(e.date), "amount": float(e.amount), "direction": e.direction, "category": e.category,
+            "label": e.label + (" (не оплачено в срок)" if overdue else ""), "counterparty_name": e.counterparty_name, "counterparty_inn": e.counterparty_inn,
+            "source": e.source, "confidence": e.probability, "pattern_key": f"event:{e.id}", "external_ref": e.external_ref,
+            "obligation_key": e.meta.get("obligation_key", ""),
+            "probability": min(e.probability, .5) if overdue and incoming else (1.0 if overdue else e.probability),
+            "timing_std_days": max(e.timing_std_days, 5.) if overdue and incoming else (0.0 if overdue else e.timing_std_days)})
     return pd.DataFrame(rows, columns=EVENT_COLS)
 
 
@@ -95,7 +98,7 @@ def refresh_event_statuses(company: Company, today=None) -> dict:
     """План-факт по событиям: сопоставляет ожидаемые события с фактическими операциями."""
     ops = ops_services.ops_frame(company)
     today = pd.Timestamp(today or company.as_of or (ops.operation_date.max() if len(ops) else pd.Timestamp.today()))
-    qs = list(PlannedEvent.objects.filter(company=company, status__in=["expected", "overdue"]))
+    qs = list(PlannedEvent.objects.filter(company=company).exclude(status="cancelled"))
     if not qs:
         return {"matched": 0, "overdue": 0}
     expected = pd.DataFrame(
@@ -107,12 +110,14 @@ def refresh_event_statuses(company: Company, today=None) -> dict:
     counts = {"matched": 0, "overdue": 0}
     for r in res.itertuples():
         e = by_id[r.id]
+        e.matched_date = None
+        e.matched_operation = None
         if r.status == "matched":
             e.status = "matched"
             e.matched_date = pd.Timestamp(r.matched_date).date()
             from apps.operations.models import Operation
 
-            e.matched_operation = Operation.objects.filter(company=company, operation_id=r.matched_operation_id).first()
+            e.matched_operation = Operation.objects.filter(company=company, operation_id=r.matched_operation_id, operation_date=e.matched_date).first()
             counts["matched"] += 1
         elif r.status == "overdue":
             e.status = "overdue"

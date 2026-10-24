@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from cashflow_core.categories import LABELS
+from cashflow_core.categories import LABELS, BY_CODE
 
 from .models import Operation
 
@@ -15,3 +15,8 @@ class OperationSerializer(serializers.ModelSerializer):
 
     def get_category_label(self, obj):
         return LABELS.get(obj.category, obj.category)
+
+    def validate_category(self, value):
+        if self.instance and BY_CODE[value].direction != ("in" if self.instance.direction == "Поступление" else "out"):
+            raise serializers.ValidationError("Категория не соответствует направлению операции")
+        return value

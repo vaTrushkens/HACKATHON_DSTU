@@ -4,6 +4,7 @@ export type Company = {
   id: number; code: string; name: string; inn: string; legal_form: string; industry: string
   first_operation_date: string | null; last_operation_date: string | null; operations_count: number
   min_balance: string; as_of_override: string | null; as_of: string | null; tax_regime: string
+  external_code?: string; dataset_id?: string | null
 }
 
 export type DailyPoint = {
@@ -20,6 +21,7 @@ export type Forecast = {
   as_of: string; opening_balance: number; model: string; scenario: any; min_balance: number
   daily: DailyPoint[]; events: ForecastEvent[]; data_quality: { level: string; history_days: number; stale_days: number | null; notes: string[] }
   components: Record<string, number>
+  calculation_log?: { step: number; title: string; [key: string]: any }[]
 }
 
 export type Alert = { level: 'high' | 'medium' | 'low' | 'info'; kind: string; title: string; message: string; date: string | null; amount: number | null; probability: number | null; details: any }

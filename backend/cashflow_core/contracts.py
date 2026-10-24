@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 import pandas as pd
 
@@ -42,6 +43,18 @@ def contract_schedule(t: ContractTerms) -> list[dict]:
     """Список событий: date, amount, label, probability, timing_std_days."""
     start = pd.Timestamp(t.start_date).normalize()
     end = pd.Timestamp(t.end_date).normalize() if t.end_date is not None else start
+    if t.direction not in ("Поступление", "Списание"):
+        raise ValueError("Некорректное направление")
+    if not math.isfinite(float(t.total_amount)) or t.total_amount <= 0:
+        raise ValueError("Сумма договора должна быть положительной")
+    if pd.isna(start) or pd.isna(end) or end < start:
+        raise ValueError("Дата окончания не может быть раньше начала")
+    if not math.isfinite(t.prepayment_pct) or not 0 <= t.prepayment_pct <= 100:
+        raise ValueError("Предоплата должна быть от 0 до 100%")
+    if not 0 <= t.deferral_days <= 3650 or not 1 <= t.installments <= 120:
+        raise ValueError("Отсрочка: 0–3650 дней; число платежей: 1–120")
+    if t.day_of_month is not None and not 1 <= t.day_of_month <= 31:
+        raise ValueError("День месяца должен быть от 1 до 31")
     deferral = pd.Timedelta(days=int(t.deferral_days))
     rows: list[tuple[pd.Timestamp, float, str]] = []
 
@@ -61,18 +74,32 @@ def contract_schedule(t: ContractTerms) -> list[dict]:
         cur = start
         for i in range(n):
             d = nth_day_of_month(cur.year, cur.month, dom) if i > 0 or t.day_of_month else cur
+            if d < start:
+                cur = cur + pd.DateOffset(months=1)
+                d = nth_day_of_month(cur.year, cur.month, dom)
             rows.append((d + deferral, per if i < n - 1 else round(t.total_amount - per * (n - 1), 2), f"{t.label}: платёж {i + 1}/{n}"))
             cur = (pd.Timestamp(year=cur.year, month=cur.month, day=1) + pd.DateOffset(months=1))
     elif t.schedule_type == "milestones":
+        if not isinstance(t.milestones, list) or not t.milestones:
+            raise ValueError("Укажите этапы договора")
         for i, m in enumerate(t.milestones, start=1):
+            if not isinstance(m, dict):
+                raise ValueError("Этап договора должен быть объектом")
             amount = float(m["amount"]) if m.get("amount") is not None else round(t.total_amount * float(m.get("pct", 0)) / 100, 2)
-            rows.append((pd.Timestamp(m["date"]).normalize() + deferral, amount, m.get("label") or f"{t.label}: этап {i}"))
+            date = pd.Timestamp(m["date"]).normalize()
+            if pd.isna(date) or date < start or (t.end_date is not None and date > end) or not math.isfinite(amount) or amount <= 0:
+                raise ValueError("Некорректная дата или сумма этапа")
+            rows.append((date + deferral, amount, m.get("label") or f"{t.label}: этап {i}"))
+        if abs(sum(amount for _, amount, _ in rows) - t.total_amount) > .01:
+            raise ValueError("Сумма этапов должна совпадать с суммой договора")
     else:
         raise ValueError(f"unknown schedule_type {t.schedule_type}")
 
     is_in = t.direction == "Поступление"
     out = []
     for d, amount, label in rows:
+        if amount <= 0:
+            raise ValueError("Сумма каждого платежа должна быть положительной; уменьшите число платежей")
         if is_in and t.client_median_delay:
             d = d + pd.Timedelta(days=int(round(t.client_median_delay)))
         d = shift_to_business_day(d, "forward")

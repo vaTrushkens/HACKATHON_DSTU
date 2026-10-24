@@ -26,7 +26,7 @@ class Operation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("company", "operation_id")
+        unique_together = ("company", "operation_date", "operation_id")
         indexes = [models.Index(fields=["company", "operation_date"])]
         ordering = ["operation_date", "operation_id"]
 

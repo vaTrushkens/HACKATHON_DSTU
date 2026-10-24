@@ -25,27 +25,28 @@ def match_events(expected: pd.DataFrame, actual: pd.DataFrame, today: pd.Timesta
     exp["matched_date"] = pd.NaT
     if exp.empty:
         return exp
-    act = actual.copy()
+    act = actual[actual.operation_date <= pd.Timestamp(today)].copy()
     if act.empty:
         exp.loc[exp.date < today - pd.Timedelta(days=DATE_TOL_DAYS), "status"] = "overdue"
         return exp
     act["cp_key"] = counterparty_key(act)
+    act["op_key"] = list(zip(act.operation_date, act.operation_id))
     exp["cp_key"] = counterparty_key(exp.rename(columns={"counterparty_inn": "counterparty_inn", "counterparty_name": "counterparty_name"})) if "counterparty_inn" in exp.columns else ""
     used: set = set()
     for i, e in exp.sort_values("date").iterrows():
         lo, hi = e.date - pd.Timedelta(days=DATE_TOL_DAYS), e.date + pd.Timedelta(days=DATE_TOL_DAYS + 4)
-        cand = act[(act.direction == e.direction) & (act.operation_date >= lo) & (act.operation_date <= hi) & ~act.operation_id.isin(used)]
+        cand = act[(act.direction == e.direction) & (act.operation_date >= lo) & (act.operation_date <= hi) & ~act.op_key.isin(used)]
         if e.cp_key and not str(e.cp_key).startswith("name:"):
             cand = cand[cand.cp_key == e.cp_key]
         elif e.cp_key:
-            cand = cand[(cand.cp_key == e.cp_key) | (cand.category == e.category)]
+            cand = cand[cand.cp_key == e.cp_key]
         else:
             cand = cand[cand.category == e.category]
         tol = AMOUNT_TOL_BY_CATEGORY.get(e.category, AMOUNT_TOL)
         cand = cand[(cand.amount - e.amount).abs() <= tol * e.amount]
         if not cand.empty:
             m = cand.iloc[(cand.operation_date - e.date).abs().argsort().iloc[0]]
-            used.add(m.operation_id)
+            used.add(m.op_key)
             exp.at[i, "status"] = "matched"
             exp.at[i, "matched_operation_id"] = m.operation_id
             exp.at[i, "matched_amount"] = float(m.amount)

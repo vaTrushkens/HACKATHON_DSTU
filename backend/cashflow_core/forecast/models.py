@@ -107,7 +107,7 @@ def make_feature_rows(daily: pd.DataFrame, horizon: pd.DatetimeIndex, meta: dict
         rows.append(
             {
                 "date": d,
-                "h": i,
+                "h": int((d - pd.Timestamp(meta.get("as_of", daily.index.max()))).days),
                 "weekday": d.weekday(),
                 "dom": d.day,
                 "month": d.month,
@@ -156,7 +156,7 @@ class HGBFlowModel(FlowModel):
         params = dict(max_iter=300, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=40, l2_regularization=1.0, categorical_features=cat_mask, random_state=42)
         self.model_in = HistGradientBoostingRegressor(**params).fit(X, panel["y_in"])
         self.model_out = HistGradientBoostingRegressor(**params).fit(X, panel["y_out"])
-        self.train_info = {"rows": int(len(panel)), "companies": int(panel["company_id"].nunique()) if "company_id" in panel else None}
+        self.train_info = {"rows": int(len(panel)), "companies": int(panel["company_id"].nunique()) if "company_id" in panel else None, "feature_version": 2}
         return self
 
     def predict(self, daily, horizon, meta=None):
@@ -195,7 +195,7 @@ def build_training_panel(company_daily: dict[str, pd.DataFrame], meta: dict[str,
             fut = daily[(daily.index > c) & (daily.index <= c + pd.Timedelta(days=horizon))]
             if len(fut) < 10:
                 continue
-            rows = make_feature_rows(hist, fut.index, meta.get(cid))
+            rows = make_feature_rows(hist, fut.index, {**meta.get(cid, {}), "as_of": c})
             rows["y_in"] = np.clip(fut.inflow_var.values / (rows["_lv_in"].values + EPS), 0, 20)
             rows["y_out"] = np.clip(fut.outflow_var.values / (rows["_lv_out"].values + EPS), 0, 20)
             rows["company_id"] = cid

@@ -13,6 +13,7 @@ class ForecastRun(models.Model):
     min_balance = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     opening_balance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     components = models.JSONField(default=dict)
+    calculation_log = models.JSONField(default=list)
     data_quality = models.JSONField(default=dict)
     risk = models.JSONField(default=dict)
     events = models.JSONField(default=list)

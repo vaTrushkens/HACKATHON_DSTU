@@ -59,6 +59,13 @@ class MLCategorizer:
             y = labels[mask]
             if y.nunique() < 2 or len(sub) < 50:
                 continue
+            # A singleton cannot be stratified. Leave rare categories to rules until
+            # there is enough evidence rather than failing the entire training job.
+            frequent = y.value_counts()
+            valid = y.isin(frequent[frequent >= 5].index)
+            sub, y = sub[valid], y[valid]
+            if y.nunique() < 2 or len(sub) < 50:
+                continue
             X = _text(sub)
             X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
             pipe = _make_pipeline().fit(X_tr, y_tr)

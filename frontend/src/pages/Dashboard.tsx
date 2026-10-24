@@ -1,5 +1,5 @@
 import Select from '../components/Select'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { get, patch } from '../api'
 import { useAuth } from '../auth'
@@ -19,36 +19,39 @@ export default function Dashboard() {
   const [actual, setActual] = useState<HistoryPoint[]>([])
   const [showActual, setShowActual] = useState(false)
   const [horizon, setHorizon] = useState(60)
-  const [asOf, setAsOf] = useState<string>('')
-  const [minBalance, setMinBalance] = useState<string>('')
+  const [asOf, setAsOf] = useState<string>(company?.as_of ?? '')
+  const [minBalance, setMinBalance] = useState<string>(String(Number(company?.min_balance) || 0))
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
 
-  useEffect(() => { if (company) { setAsOf(company.as_of ?? ''); setMinBalance(String(Number(company.min_balance) || 0)) } }, [company?.id])
+  const requestVersion = useRef(0)
+  useEffect(() => () => { requestVersion.current += 1 }, [])
 
   const load = async () => {
     if (!company) return
+    const version = ++requestVersion.current
     setLoading(true); setErr('')
     try {
       const params: any = { horizon }
       if (asOf) params.as_of = asOf
       if (minBalance !== '') params.min_balance = Number(minBalance)
       const [fc, sm] = await Promise.all([get<ForecastResponse>(`/companies/${company.id}/forecast/`, params), get(`/companies/${company.id}/summary/`, asOf ? { as_of: asOf } : {})])
-      setData(fc); setSummary(sm)
       const a = fc.forecast.as_of
       const [h, act] = await Promise.all([
         get<HistoryPoint[]>(`/companies/${company.id}/history/`, { from: addDays(a, -120), to: a }),
         get<HistoryPoint[]>(`/companies/${company.id}/history/`, { from: addDays(a, 1), to: addDays(a, horizon) }),
       ])
-      setHistory(h); setActual(act)
-    } catch (e: any) { setErr(e?.response?.data?.detail || 'Не удалось построить прогноз') } finally { setLoading(false) }
+      if (version === requestVersion.current) { setData(fc); setSummary(sm); setHistory(h); setActual(act) }
+    } catch (e: any) { if (version === requestVersion.current) setErr(e?.response?.data?.detail || 'Не удалось построить прогноз: проверьте дату и параметры') } finally { if (version === requestVersion.current) setLoading(false) }
   }
   useEffect(() => { if (company && asOf !== undefined) load() }, [company?.id, horizon])
 
   const saveSettings = async () => {
     if (!company) return
-    await patch(`/companies/${company.id}/`, { as_of_override: asOf || null, min_balance: Number(minBalance) || 0 })
-    await refreshCompanies(); load()
+    try {
+      await patch(`/companies/${company.id}/`, { as_of_override: asOf || null, min_balance: Number(minBalance) || 0 })
+      await refreshCompanies(); await load()
+    } catch { setErr('Не удалось сохранить параметры') }
   }
 
   if (!company) return null
@@ -84,6 +87,16 @@ export default function Dashboard() {
           </div>
 
           <RiskCard risk={risk} asOf={fc.as_of} />
+          <div className="small muted">Вероятность — оценка по симуляциям, а не гарантия. Калибровка на исторических данных показана в разделе «Качество прогноза».</div>
+          <details className="card">
+            <summary>Пошаговый журнал расчёта</summary>
+            <p>Выгрузка содержит параметры, этапы вычислений, прогноз по дням и события текущей компании.</p>
+            <button className="secondary" onClick={() => {
+              const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+              const link = document.createElement('a'); link.href = url; link.download = `forecast-${company.code}-${fc.as_of}.json`; link.click(); URL.revokeObjectURL(url)
+            }}>Скачать расчёт JSON</button>
+            {fc.calculation_log?.map(step => <div key={step.step}><h3>{step.step}. {step.title}</h3><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(step, null, 2)}</pre></div>)}
+          </details>
 
           <div className="card">
             <div className="row" style={{ justifyContent: 'space-between' }}>

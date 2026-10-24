@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { useTheme, type Theme } from '../theme'
 import ChatWidget from './ChatWidget'
+import CompanyImport from './CompanyImport'
 
 const links = [
   ['/', 'Обзор'],
@@ -29,6 +30,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               {companies.map((c) => <option key={c.id} value={c.id}>{c.code} · {c.name}</option>)}
             </Select>
             <span>{user?.username}</span>
+            <CompanyImport />
             <Select aria-label="Тема оформления" className="theme-select" value={theme} onValueChange={(value) => setTheme(value as Theme)}>
               <option value="auto">Тема: авто</option>
               <option value="light">Тема: светлая</option>
@@ -42,7 +44,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </nav>
       </header>
       {/* Charts read CSS variables at render time, so pages remount when the resolved theme changes. */}
-      <main className="main" key={resolved}>{company ? children : <div className="empty">Нет доступных компаний. Загрузите выписку или обратитесь к администратору.</div>}</main>
+      <main className="main" key={`${resolved}:${company?.id ?? 'empty'}`}>{company ? children : <div className="empty">Нет доступных компаний. Нажмите «Добавить данные» для создания компании или загрузки нового набора.</div>}</main>
       <ChatWidget />
     </div>
   )

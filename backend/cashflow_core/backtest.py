@@ -1,10 +1,9 @@
 """Rolling-origin бэктест прогноза остатка и детекции кассовых разрывов.
 
-Для каждой компании и даты среза строится прогноз на горизонт и сравнивается
-с «контрфактическим» фактом: реальный остаток за вычетом спасательных
-вливаний (займы учредителя, транши кредитов), которые пришли после среза.
-Так модель оценивается на вопросе «что было бы без экстренных денег» —
-именно это и есть кассовый разрыв.
+Для каждой компании и даты среза прогноз сравнивается с реальным остатком.
+Опциональный actual_mode=without_financing вычитает финансирование после
+среза, чтобы отдельно проверить риск при отсутствии экстренных вливаний.
+Модель и признаки не должны использовать данные после даты среза.
 """
 from __future__ import annotations
 
@@ -17,6 +16,7 @@ from .categories import FINANCING_CODES
 from .forecast.engine import ForecastInputs, run_forecast
 from .forecast.models import FlowModel
 from .recurring import detect_recurring
+from .categorizer.pipeline import categorize_frame, apply_rules
 
 DIR_IN = "Поступление"
 
@@ -31,6 +31,15 @@ class BacktestConfig:
     n_paths: int = 300
     gap_prob_threshold: float = 0.5
     min_balance: float = 0.0
+    actual_mode: str = "actual"
+
+    def __post_init__(self):
+        if not 1 <= self.horizon <= 180 or not 1 <= self.cutoffs_every_days <= 365 or not 1 <= self.n_paths <= 10000:
+            raise ValueError("Некорректные параметры бэктеста")
+        if pd.Timestamp(self.test_start) > pd.Timestamp(self.test_end):
+            raise ValueError("Начало периода позже окончания")
+        if self.actual_mode not in ("actual", "without_financing"):
+            raise ValueError("Неизвестный способ расчёта факта")
 
 
 @dataclass
@@ -41,7 +50,7 @@ class BacktestRow:
     cutoff: str
     mae_balance: float
     mae_norm: float  # MAE / среднемесячный оборот
-    mase: float  # относительно наивного «остаток не меняется»
+    mase: float | None  # MAE / среднее абсолютное дневное изменение в истории
     coverage80: float
     end_err_norm: float
     actual_gap: bool
@@ -50,6 +59,8 @@ class BacktestRow:
     actual_gap_date: str | None
     predicted_gap_date: str | None
     lead_days: int | None
+    mse_balance: float = 0.0
+    naive_mae_ratio: float | None = None
     extras: dict = field(default_factory=dict)
 
 
@@ -72,18 +83,32 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
     if cutoffs is None:
         start = max(pd.Timestamp(cfg.test_start), first + pd.Timedelta(days=cfg.min_history_days))
         end = min(pd.Timestamp(cfg.test_end), last - pd.Timedelta(days=cfg.horizon))
-        if start >= end:
+        if start > end:
             return rows
         cutoffs = list(pd.date_range(start, end, freq=f"{cfg.cutoffs_every_days}D"))
-    turnover = ops[ops.operation_date <= cutoffs[0]].tail(2000)
+    if not cutoffs:
+        return rows
+    for model in models.values():
+        if model.name == "hgb":
+            info = getattr(model, "train_info", {})
+            until = info.get("train_until")
+            if info.get("feature_version") != 2 or not until or pd.Timestamp(until) > min(cutoffs):
+                raise ValueError("HGB должна быть переобучена с feature_version=2 и train_until не позже первого среза")
+    # Future operations are classified by rules only; no propagation from the future
+    # to historical features and no categorizer trained on the evaluation period.
+    truth = ops.copy()
+    truth["category"] = apply_rules(truth).category
     for cutoff in cutoffs:
-        hist = ops[ops.operation_date <= cutoff]
+        hist = categorize_frame(ops[ops.operation_date <= cutoff])
         if len(hist) < 30 or (cutoff - hist.operation_date.min()).days < cfg.min_history_days:
             continue
         horizon_idx = pd.date_range(cutoff + pd.Timedelta(days=1), periods=cfg.horizon)
-        if last < horizon_idx[-1] - pd.Timedelta(days=5):  # нет факта на весь горизонт
+        if last < horizon_idx[-1]:  # нужен факт на весь горизонт
             continue
-        actual = counterfactual_actual(ops, cutoff, horizon_idx)
+        if cfg.actual_mode == "without_financing":
+            actual = counterfactual_actual(truth, cutoff, horizon_idx)
+        else:
+            actual = truth.groupby("operation_date").balance_eod.first().reindex(pd.date_range(first, horizon_idx[-1])).ffill().reindex(horizon_idx)
         if actual.isna().all():
             continue
         actual = actual.ffill().bfill()
@@ -92,6 +117,8 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
         monthly_turnover = max(monthly_turnover, 1.0)
         opening = float(hist[hist.operation_date == hist.operation_date.max()].balance_eod.iloc[0])
         naive_mae = float(np.abs(actual.values - opening).mean())
+        historical_balance = hist.groupby("operation_date").balance_eod.first().reindex(pd.date_range(first, cutoff)).ffill()
+        scale = float(historical_balance.diff().abs().mean())
         actual_gap_mask = actual < cfg.min_balance
         actual_gap = bool(actual_gap_mask.any())
         actual_gap_date = actual.index[actual_gap_mask.values][0] if actual_gap else None
@@ -116,7 +143,7 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
                     cutoff=str(cutoff.date()),
                     mae_balance=round(mae, 2),
                     mae_norm=round(mae / monthly_turnover, 4),
-                    mase=round(mae / naive_mae, 4) if naive_mae > 0 else np.nan,
+                    mase=round(mae / scale, 4) if scale > 0 else None,
                     coverage80=round(cover, 3),
                     end_err_norm=round(float(abs(actual.values[-1] - p50[-1]) / monthly_turnover), 4),
                     actual_gap=actual_gap,
@@ -125,16 +152,17 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
                     actual_gap_date=str(actual_gap_date.date()) if actual_gap_date is not None else None,
                     predicted_gap_date=str(pred_date.date()) if pred_date is not None else None,
                     lead_days=lead,
+                    mse_balance=round(float(np.square(actual.values - p50).mean()), 2),
+                    naive_mae_ratio=round(mae / naive_mae, 4) if naive_mae > 0 else None,
                     extras={"date_err_days": int((pred_date - actual_gap_date).days) if (pred_date is not None and actual_gap_date is not None) else None},
                 )
             )
-    del turnover
     return rows
 
 
 def summarize(rows: list[BacktestRow]) -> dict:
     if not rows:
-        return {"models": [], "by_industry": [], "n_forecasts": 0}
+        return {"models": [], "by_industry": [], "n_forecasts": 0, "n_companies": 0, "cutoffs": [], "horizon": None, "actual_gap_rate": None}
     df = pd.DataFrame([r.__dict__ for r in rows])
     df["date_err_days"] = df.extras.map(lambda e: e.get("date_err_days"))
     out_models = []
@@ -152,14 +180,20 @@ def summarize(rows: list[BacktestRow]) -> dict:
             {
                 "model": m,
                 "n": int(len(g)),
+                "mae_balance": round(float(g.mae_balance.mean()), 2),
+                "mse_balance": round(float(g.mse_balance.mean()), 2),
+                "rmse_balance": round(float(np.sqrt(g.mse_balance.mean())), 2),
+                "gap_accuracy": round((tp + tn) / len(g), 4),
+                "brier_score": round(float(np.square(g.gap_prob - g.actual_gap.astype(float)).mean()), 4),
                 "mae_norm_median": round(float(g.mae_norm.median()), 4),
                 "mae_norm_mean": round(float(g.mae_norm.mean()), 4),
-                "mase_median": round(float(g.mase.median()), 4),
+                "mase_median": round(float(g.mase.dropna().median()), 4) if g.mase.notna().any() else None,
+                "naive_mae_ratio_median": round(float(g.naive_mae_ratio.dropna().median()), 4) if g.naive_mae_ratio.notna().any() else None,
                 "coverage80": round(float(g.coverage80.mean()), 3),
                 "end_err_norm_median": round(float(g.end_err_norm.median()), 4),
                 "gap_precision": round(precision, 3) if precision is not None else None,
                 "gap_recall": round(recall, 3) if recall is not None else None,
-                "gap_f1": round(2 * precision * recall / (precision + recall), 3) if precision and recall else None,
+                "gap_f1": round(2 * tp / (2 * tp + fp + fn), 3) if 2 * tp + fp + fn else None,
                 "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
                 "lead_days_mean": round(float(g.lead_days.dropna().mean()), 1) if g.lead_days.notna().any() else None,
                 "date_err_days_mae": round(float(g.date_err_days.dropna().abs().mean()), 1) if g.date_err_days.notna().any() else None,
@@ -175,6 +209,6 @@ def summarize(rows: list[BacktestRow]) -> dict:
         "cutoffs": sorted(df.cutoff.unique().tolist()),
         "horizon": None,
         "models": out_models,
-        "by_industry": by_ind.to_dict(orient="records"),
+        "by_industry": by_ind.astype(object).where(pd.notna(by_ind), None).to_dict(orient="records"),
         "actual_gap_rate": round(float(df.drop_duplicates(["company_id", "cutoff"]).actual_gap.mean()), 3),
     }

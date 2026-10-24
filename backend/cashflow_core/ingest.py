@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -58,9 +60,10 @@ class IngestReport:
 def read_statement_csv(path_or_buffer) -> pd.DataFrame:
     df = pd.read_csv(
         path_or_buffer,
-        sep=";",
+        sep=None,
+        engine="python",
         encoding="utf-8-sig",
-        dtype={"counterparty_inn": str, "company_inn": str, "operation_id": str},
+        dtype={"company_id": str, "counterparty_inn": str, "company_inn": str, "operation_id": str},
     )
     df.columns = [c.strip().lstrip("﻿") for c in df.columns]
     return df
@@ -97,7 +100,7 @@ def read_1c_client_bank(text: str, own_account: str | None = None) -> pd.DataFra
         date = d.get("ДатаСписано") or d.get("ДатаПоступило") or d.get("Дата")
         rows.append(
             {
-                "operation_id": d.get("Номер") or f"1C-{i:06d}",
+                "operation_id": ("1C-" + hashlib.sha256(json.dumps([d.get("Номер"), date, payer_acc, d.get("ПолучательСчет"), d.get("Сумма"), d.get("НазначениеПлатежа")], ensure_ascii=False).encode()).hexdigest()[:48]) if d.get("Номер") else None,
                 "operation_date": pd.to_datetime(date, format="%d.%m.%Y", errors="coerce"),
                 "amount": _to_float(d.get("Сумма")),
                 "direction": DIR_OUT if is_out else DIR_IN,
@@ -150,11 +153,28 @@ def clean_operations(df: pd.DataFrame) -> tuple[pd.DataFrame, IngestReport]:
     df["counterparty_name"] = df["counterparty_name"].fillna("").astype(str).str.strip()
     df["payment_purpose"] = df["payment_purpose"].fillna("").astype(str).str.strip()
 
-    bad = df.operation_date.isna() | df.amount.isna() | df.direction.isna() | (df.amount <= 0)
+    bad = df.operation_date.isna() | ~np.isfinite(df.amount) | df.direction.isna() | (df.amount <= 0)
     rep.rows_bad = int(bad.sum())
-    df = df[~bad]
-
-    dup = df.duplicated(subset=DEDUP_KEYS, keep="first")
+    df = df[~bad].copy()
+    df["balance_eod"] = df.balance_eod.where(np.isfinite(df.balance_eod))
+    df["operation_id"] = df.operation_id.fillna("").astype(str).str.strip()
+    missing_id = df.operation_id.eq("")
+    if missing_id.any():
+        # Identical rows without bank IDs are ambiguous: preserve their multiplicity.
+        # The content hash plus occurrence number is stable when the file is reloaded.
+        keys = df.loc[missing_id, DEDUP_KEYS + ["counterparty_name"]].astype(str).apply(lambda row: json.dumps(row.tolist(), ensure_ascii=False), axis=1)
+        ordinal = keys.groupby(keys).cumcount()
+        df.loc[missing_id, "operation_id"] = ["AUTO-" + hashlib.sha256(k.encode()).hexdigest()[:40] + f"-{n}" for k, n in zip(keys, ordinal)]
+        rep.warnings.append("Нет банковских ID: использованы отпечатки содержимого; одинаковые платежи сохранены по числу строк. При частично пересекающихся файлах без ID проверьте их вручную.")
+    if (df.operation_id.str.len() > 64).any():
+        raise ValueError("Идентификатор операции длиннее 64 символов")
+    id_keys = ["operation_date", "operation_id"]
+    if "company_id" in df.columns:
+        id_keys.insert(0, "company_id")
+    repeated = df[df.duplicated(id_keys, keep=False)]
+    if not repeated.empty and (repeated.groupby(id_keys)[DEDUP_KEYS[1:] + ["counterparty_name", "balance_eod"]].nunique(dropna=True) > 1).any().any():
+        raise ValueError("Один ID операции в один день содержит противоречивые данные")
+    dup = df.duplicated(subset=id_keys, keep="first")
     rep.rows_duplicates = int(dup.sum())
     df = df[~dup]
 
@@ -166,8 +186,12 @@ def clean_operations(df: pd.DataFrame) -> tuple[pd.DataFrame, IngestReport]:
         rep.warnings.append("В выписке нет корректных операций")
         return df, rep
 
+    if (df.groupby("operation_date").balance_eod.nunique() > 1).any():
+        raise ValueError("В один день указаны разные остатки на конец дня")
     # Остаток одинаков для всех операций дня; если он пропущен — восстанавливаем.
     if df.balance_eod.isna().any():
+        if df.balance_eod.isna().all():
+            rep.warnings.append("Все остатки отсутствуют: начальный остаток принят равным нулю. Проверьте остаток перед использованием прогноза.")
         df = _restore_balances(df)
         rep.warnings.append("Часть остатков отсутствовала и восстановлена кумулятивно")
 
@@ -175,7 +199,7 @@ def clean_operations(df: pd.DataFrame) -> tuple[pd.DataFrame, IngestReport]:
     rep.last_date = str(df.operation_date.max().date())
     rep.history_days = int((df.operation_date.max() - df.operation_date.min()).days) + 1
     if rep.history_days < 90:
-        rep.warnings.append("Короткая история (< 3 месяцев): прогноз опирается на отраслевой профиль")
+        rep.warnings.append("Короткая история (< 3 месяцев): сезонность ненадёжна, используется среднее по доступным данным")
 
     daily = daily_balance_check(df)
     gaps = daily[daily.gap_amount.abs() > 1.0]
@@ -190,16 +214,14 @@ def clean_operations(df: pd.DataFrame) -> tuple[pd.DataFrame, IngestReport]:
 
 
 def _restore_balances(df: pd.DataFrame) -> pd.DataFrame:
-    signed = np.where(df.direction == DIR_IN, df.amount, -df.amount)
-    known = df.balance_eod.dropna()
-    if known.empty:
-        opening = 0.0
-    else:
-        first_idx = known.index[0]
-        opening = known.iloc[0] - signed[: first_idx + 1].sum()
-    running = opening + np.cumsum(signed)
+    """Fill only missing daily balances, preserving every observed daily anchor."""
+    net = pd.Series(np.where(df.direction == DIR_IN, df.amount, -df.amount), index=df.operation_date).groupby(level=0).sum()
+    known = df.groupby("operation_date").balance_eod.first().reindex(net.index)
+    cumulative = net.cumsum()
+    offsets = (known - cumulative).ffill().bfill().fillna(0.0)
+    restored = known.fillna(cumulative + offsets)
     df = df.copy()
-    df["balance_eod"] = pd.Series(running, index=df.index).groupby(df.operation_date).transform("last")
+    df["balance_eod"] = df.balance_eod.fillna(df.operation_date.map(restored))
     return df
 
 
@@ -255,7 +277,7 @@ def to_standard_frame(raw: pd.DataFrame) -> pd.DataFrame:
         df["amount"] = np.where(credit > 0, credit, debit)
         df["direction"] = np.where(credit > 0, DIR_IN, DIR_OUT)
     if "operation_id" not in df.columns:
-        df["operation_id"] = [f"OP-{i:06d}" for i in range(1, len(df) + 1)]
+        df["operation_id"] = None
     return df
 
 

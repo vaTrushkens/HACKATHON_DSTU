@@ -2,7 +2,7 @@ import { chartTooltip } from '../chartTheme'
 import ReactECharts from 'echarts-for-react'
 import { memo, useMemo } from 'react'
 import type { DailyPoint, ForecastEvent, HistoryPoint } from '../types'
-import { fmtDate, fmtMoney, fmtShort, sourceLabel } from '../format'
+import { addDays, escapeHtml, fmtDate, fmtMoney, fmtShort, sourceLabel } from '../format'
 
 type Props = {
   daily: DailyPoint[]
@@ -31,7 +31,7 @@ export default memo(function BalanceChart({ daily, events = EMPTY_EVENTS, histor
     const critical = css('--critical', '#d03b3b')
 
     const histData = history.map((h) => [h.date, h.balance])
-    const asOf = daily[0]?.date
+    const asOf = daily[0]?.date ? addDays(daily[0].date, -1) : undefined
     const bridge = history.length ? [[history[history.length - 1].date, history[history.length - 1].balance]] : []
     const p50 = [...bridge, ...daily.map((d) => [d.date, d.p50])]
     const p10 = daily.map((d) => [d.date, d.p10])
@@ -48,13 +48,13 @@ export default memo(function BalanceChart({ daily, events = EMPTY_EVENTS, histor
 
     const series: any[] = [
       { name: 'Факт', type: 'line', data: histData, showSymbol: false, lineStyle: { width: 2, color: ink2 }, itemStyle: { color: ink2 }, z: 3 },
-      { name: 'p10', type: 'line', data: p10, stack: 'band', showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, silent: true, tooltip: { show: false } },
-      { name: 'Коридор 10–90%', type: 'line', data: band, stack: 'band', showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: blue, opacity: 0.14 }, silent: true, tooltip: { show: false } },
+      { name: 'p10', type: 'line', data: p10, stack: 'band', stackStrategy: 'all', showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, silent: true, tooltip: { show: false } },
+      { name: 'Коридор 10–90%', type: 'line', data: band, stack: 'band', stackStrategy: 'all', showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: blue, opacity: 0.14 }, silent: true, tooltip: { show: false } },
       { name: 'Прогноз (медиана)', type: 'line', data: p50, showSymbol: false, lineStyle: { width: 2.5, color: blue }, itemStyle: { color: blue }, z: 4 },
     ]
     if (cmp.length) series.push({ name: compareLabel, type: 'line', data: cmp, showSymbol: false, lineStyle: { width: 2.5, color: violet, type: [6, 4] }, itemStyle: { color: violet }, z: 4 })
     if (actualData.length) series.push({ name: 'Что было на самом деле', type: 'line', data: actualData, showSymbol: false, lineStyle: { width: 2, color: ink2, type: 'dotted' }, itemStyle: { color: ink2 }, z: 5 })
-    series.push({ name: 'События', type: 'scatter', data: markers, z: 6, tooltip: { formatter: (p: any) => { const e: ForecastEvent = p.data.ev; return `<b>${e.label}</b><br/>${fmtDate(e.date)} · ${e.direction === 'Поступление' ? '+' : '−'}${fmtMoney(e.amount)}<br/><span style="color:${muted}">${sourceLabel(e.source)}</span>` } } })
+    series.push({ name: 'События', type: 'scatter', data: markers, z: 6, tooltip: { formatter: (p: any) => { const e: ForecastEvent = p.data.ev; return `<b>${escapeHtml(e.label)}</b><br/>${fmtDate(e.date)} · ${e.direction === 'Поступление' ? '+' : '−'}${fmtMoney(e.amount)}<br/><span style="color:${muted}">${escapeHtml(sourceLabel(e.source))}</span>` } } })
     series.push({
       name: 'Порог', type: 'line', data: [], markLine: {
         silent: true, symbol: 'none', lineStyle: { color: critical, type: 'dashed', width: 1.5 },
@@ -72,9 +72,9 @@ export default memo(function BalanceChart({ daily, events = EMPTY_EVENTS, histor
         trigger: 'axis', axisPointer: { type: 'line', lineStyle: { color: muted } },
         formatter: (params: any[]) => {
           const date = params[0]?.axisValue
-          const d = byDate.get(date)
+          const d = byDate.get(typeof date === 'number' ? new Date(date).toISOString().slice(0, 10) : date)
           const lines = [`<b>${fmtDate(date)}</b>`]
-          params.filter((p) => p.seriesType === 'line' && p.value?.[1] !== undefined && !['p10', 'Коридор 10–90%'].includes(p.seriesName)).forEach((p) => lines.push(`${p.marker} ${p.seriesName}: <b>${fmtMoney(p.value[1])}</b>`))
+          params.filter((p) => p.seriesType === 'line' && p.value?.[1] !== undefined && !['p10', 'Коридор 10–90%'].includes(p.seriesName)).forEach((p) => lines.push(`${p.marker} ${escapeHtml(p.seriesName)}: <b>${fmtMoney(p.value[1])}</b>`))
           if (d) {
             lines.push(`<span style="color:${muted}">коридор ${fmtShort(d.p10)} … ${fmtShort(d.p90)}</span>`)
             if (d.prob_below > 0.02) lines.push(`<span style="color:${critical}">вероятность ниже порога: ${Math.round(d.prob_below * 100)}%</span>`)

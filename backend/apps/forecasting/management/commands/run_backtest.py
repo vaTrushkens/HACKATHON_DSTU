@@ -6,17 +6,11 @@
 """
 from __future__ import annotations
 
-import time
-
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
+from apps.forecasting.evaluation import evaluate
 
 from apps.companies.models import Company
-from apps.forecasting import services as fc_services
-from apps.forecasting.models import BacktestResult
-from apps.operations import services as ops_services
-from cashflow_core.backtest import BacktestConfig, evaluate_company, summarize
-from cashflow_core.categorizer.ml import MLCategorizer
-from cashflow_core.forecast import get_model
+from cashflow_core.backtest import BacktestConfig
 
 
 class Command(BaseCommand):
@@ -31,30 +25,29 @@ class Command(BaseCommand):
         parser.add_argument("--paths", type=int, default=300)
         parser.add_argument("--limit", type=int, default=0, help="Ограничить число компаний (для быстрого прогона)")
         parser.add_argument("--name", default="default")
+        parser.add_argument("--company", help="Код компании в базе")
+        parser.add_argument("--dataset", help="UUID импортированного набора")
+        parser.add_argument("--actual-mode", choices=['actual', 'without_financing'], default='actual')
 
     def handle(self, *args, **opts):
-        cfg = BacktestConfig(horizon=opts["horizon"], cutoffs_every_days=opts["every"], test_start=opts["test_start"], test_end=opts["test_end"], n_paths=opts["paths"])
-        models = {}
-        for name in opts["models"].split(","):
-            name = name.strip()
-            models[name] = get_model(name, str(fc_services.FLOW_MODEL_PATH)) if name == "hgb" else get_model(name)
-        companies = list(Company.objects.all())
+        companies = Company.objects.order_by('code')
+        if opts['company']:
+            companies = companies.filter(code=opts['company'])
+        if opts['dataset']:
+            companies = companies.filter(dataset_id=opts['dataset'])
         if opts["limit"]:
             companies = companies[: opts["limit"]]
-        rows = []
-        t = time.time()
-        for i, c in enumerate(companies, 1):
-            ops = ops_services.ops_frame(c)
-            meta = {"company_id": c.code, "industry": c.industry, "legal_form": c.legal_form}
-            rows += evaluate_company(ops, meta, models, cfg)
-            if i % 10 == 0:
-                self.stdout.write(f"  {i}/{len(companies)} компаний, {len(rows)} прогнозов, {time.time() - t:.0f}s")
-        summary = summarize(rows)
-        summary["horizon"] = cfg.horizon
-        cat_metrics = {}
-        if ops_services.CATEGORIZER_PATH.exists():
-            cat_metrics = MLCategorizer.load(str(ops_services.CATEGORIZER_PATH)).metrics
-        BacktestResult.objects.create(name=opts["name"], config=cfg.__dict__, summary=summary, rows=[r.__dict__ for r in rows], categorizer_metrics=cat_metrics)
-        self.stdout.write(self.style.SUCCESS(f"Готово: {len(rows)} прогнозов за {time.time() - t:.0f}s"))
-        for m in summary["models"]:
-            self.stdout.write(f"  {m['model']:16s} MAE/оборот={m['mae_norm_median']:.3f} MASE={m['mase_median']:.3f} cover80={m['coverage80']:.2f} gapP={m['gap_precision']} gapR={m['gap_recall']} lead={m['lead_days_mean']}")
+        companies = list(companies)
+        if not companies:
+            raise CommandError('Не найдены компании')
+        try:
+            cfg = BacktestConfig(horizon=opts['horizon'], cutoffs_every_days=opts['every'], test_start=opts['test_start'], test_end=opts['test_end'], n_paths=opts['paths'], actual_mode=opts['actual_mode'])
+            rec = evaluate(companies, cfg, [s.strip() for s in opts['models'].split(',')], opts['name'],
+                progress=lambda i,n,r,t: self.stdout.write(f'{i}/{n} компаний; {r} прогнозов; {t:.0f} с'))
+        except (ValueError, KeyError) as exc:
+            raise CommandError(str(exc)) from exc
+        for warning in rec.config['warnings']:
+            self.stdout.write(self.style.WARNING(warning))
+        for m in rec.summary['models']:
+            self.stdout.write(f"{m['model']}: MAE={m['mae_balance']}, MSE={m['mse_balance']}, Accuracy={m['gap_accuracy']}, Precision={m['gap_precision']}, Recall={m['gap_recall']}, F1={m['gap_f1']}; {m['confusion']}")
+        self.stdout.write(self.style.SUCCESS(f"Сохранён бэктест #{rec.id}: {rec.summary['n_forecasts']} прогнозов"))

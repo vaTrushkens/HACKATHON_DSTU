@@ -15,6 +15,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import OrderedDict
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -26,9 +29,12 @@ from ..taxes import tax_calendar
 from .models import FlowModel, SeasonalNaiveModel
 from .scenarios import Scenario, apply_to_events
 from .series import balance_as_of, daily_flows
+from .reconcile import reconcile_events, residual_means
 
-EVENT_COLS = ["date", "amount", "direction", "category", "label", "counterparty_name", "source", "confidence", "pattern_key"]
+EVENT_COLS = ["date", "amount", "direction", "category", "label", "counterparty_name", "counterparty_inn", "source", "confidence", "pattern_key", "external_ref", "obligation_key"]
 MIN_HISTORY_FOR_MODEL = 60
+ENGINE_VERSION = "2"
+_STOCH_CACHE = OrderedDict()
 
 
 @dataclass
@@ -57,6 +63,7 @@ class ForecastResult:
     min_balance: float
     data_quality: dict
     components: dict
+    calculation_log: list[dict] = field(default_factory=list)
 
     def to_dict(self, with_paths: bool = False) -> dict:
         d = self.daily.reset_index().rename(columns={"index": "date"})
@@ -71,9 +78,10 @@ class ForecastResult:
             "scenario": self.scenario.as_dict(),
             "min_balance": self.min_balance,
             "daily": d.round(2).to_dict(orient="records"),
-            "events": ev.round(2).to_dict(orient="records"),
+            "events": ev.round(2).astype(object).where(pd.notna(ev), None).to_dict(orient="records"),
             "data_quality": self.data_quality,
             "components": self.components,
+            "calculation_log": self.calculation_log,
         }
         if with_paths:
             out["paths"] = np.round(self.paths, 2).tolist()
@@ -82,6 +90,8 @@ class ForecastResult:
 
 def run_forecast(inp: ForecastInputs, model: FlowModel | None = None, n_paths: int = 1000, seed: int = 42) -> ForecastResult:
     model = model or SeasonalNaiveModel()
+    if not 1 <= inp.horizon_days <= 366 or not 1 <= n_paths <= 10000:
+        raise ValueError("Недопустимый горизонт или число траекторий")
     rng = np.random.default_rng(seed)
     as_of = pd.Timestamp(inp.as_of).normalize()
     horizon = pd.date_range(as_of + pd.Timedelta(days=1), periods=inp.horizon_days, freq="D")
@@ -93,6 +103,9 @@ def run_forecast(inp: ForecastInputs, model: FlowModel | None = None, n_paths: i
     daily = daily_flows(ops, as_of)
     history_days = int((daily.index.max() - daily.index.min()).days) if len(daily) else 0
     quality = _data_quality(ops, daily, as_of, history_days)
+    digest = hashlib.sha256(pd.util.hash_pandas_object(ops, index=False).values.tobytes()).hexdigest()
+    trace = [{"step": 1, "title": "Входные данные", "rows": len(ops), "as_of": str(as_of.date()), "data_sha256": digest, "engine_version": ENGINE_VERSION},
+             {"step": 2, "title": "Категории и регулярности", "categories": {str(k): int(v) for k, v in ops.category.value_counts().items()}, "patterns": len(inp.patterns), "opening_balance": round(opening, 2)}]
 
     # ---- 1. детерминированный слой -------------------------------------------------
     events = project(inp.patterns, as_of + pd.Timedelta(days=1), end)
@@ -105,7 +118,10 @@ def run_forecast(inp: ForecastInputs, model: FlowModel | None = None, n_paths: i
         for c in EVENT_COLS:
             if c not in pe.columns:
                 pe[c] = None
-        events = pd.concat([events, pe[EVENT_COLS + [c for c in ("probability", "timing_std_days") if c in pe.columns]]], ignore_index=True)
+        events, replaced = reconcile_events(events, pe[EVENT_COLS + [c for c in ("probability", "timing_std_days") if c in pe.columns]])
+    else:
+        replaced = 0
+    baseline_events = events.copy()
     events = apply_to_events(events, inp.scenario, as_of, end)
     if "probability" not in events.columns:
         events["probability"] = 1.0
@@ -117,46 +133,61 @@ def run_forecast(inp: ForecastInputs, model: FlowModel | None = None, n_paths: i
     events = events.sort_values("date").reset_index(drop=True)
 
     # «прочие регулярные расходы»: fixed-категории, не покрытые паттернами/налогами
-    fixed_residual_daily = _fixed_residual(ops, daily, events, as_of)
+    fixed_residual_daily = _fixed_residual(ops, daily, baseline_events, as_of, horizon)
     if inp.scenario.fixed_cost_change_pct:
         fixed_residual_daily *= 1 + inp.scenario.fixed_cost_change_pct / 100
 
     # ---- 2. стохастический слой ----------------------------------------------------
-    if len(daily) >= MIN_HISTORY_FOR_MODEL:
-        means = model.predict(daily, horizon, inp.meta)
-        model_name = model.name
-    else:
-        means = _industry_fallback(daily, horizon, inp.industry_profile)
-        model_name = "industry_profile"
+    cache_key = (digest, str(as_of), H, n_paths, seed, id(model), json.dumps(inp.meta, sort_keys=True), json.dumps(inp.industry_profile, sort_keys=True))
+    cached = _STOCH_CACHE.get(cache_key)
+    cache_hit = cached is not None
+    if cached is None:
+        if len(daily) >= MIN_HISTORY_FOR_MODEL:
+            means = model.predict(daily, horizon, {**inp.meta, "as_of": as_of})
+            model_name = model.name
+        else:
+            means = _industry_fallback(daily, horizon, inp.industry_profile)
+            model_name = "industry_profile" if inp.industry_profile else "short_history_mean"
+        ratios_in, ratios_out, level_sigma = _dispersion(daily)
+        # Mean-preserving lognormal shocks; independent streams for events below.
+        level_in = np.exp(rng.normal(-level_sigma ** 2 / 2, level_sigma, size=(n_paths, 1)))
+        sigma_out = level_sigma * .5
+        level_out = np.exp(rng.normal(-sigma_out ** 2 / 2, sigma_out, size=(n_paths, 1)))
+        r_in = rng.choice(ratios_in, size=(n_paths, H))
+        r_out = rng.choice(ratios_out, size=(n_paths, H))
+        cached = (means, model_name, level_sigma, r_in * level_in, r_out * level_out, model)
+        _STOCH_CACHE[cache_key] = cached
+        if len(_STOCH_CACHE) > 8:
+            _STOCH_CACHE.popitem(last=False)
+    means, model_name, level_sigma, factors_in, factors_out, _ = cached
+    means, covered = residual_means(ops, baseline_events, means, as_of)
     rev_mult = 1 + inp.scenario.revenue_change_pct / 100
     mean_in = means.inflow_mean.values * rev_mult
     mean_out = means.outflow_mean.values
     bd = means.is_business_day.values
 
-    ratios_in, ratios_out, level_sigma = _dispersion(daily)
-
-    # ---- 3. Монте-Карло ------------------------------------------------------------
-    level_in = np.exp(rng.normal(0, level_sigma, size=(n_paths, 1)))
-    level_out = np.exp(rng.normal(0, level_sigma * 0.5, size=(n_paths, 1)))
-    r_in = rng.choice(ratios_in, size=(n_paths, H)) if len(ratios_in) else np.ones((n_paths, H))
-    r_out = rng.choice(ratios_out, size=(n_paths, H)) if len(ratios_out) else np.ones((n_paths, H))
-    stoch_in = mean_in[None, :] * r_in * level_in
-    stoch_out = (mean_out[None, :] * r_out * level_out) + fixed_residual_daily * bd[None, :]
+    stoch_in = mean_in[None, :] * factors_in
+    stoch_out = mean_out[None, :] * factors_out + fixed_residual_daily * bd[None, :]
+    trace.extend([{"step": 3, "title": "Согласование событий", "events": len(events), "replaced_inferred": replaced, "removed_statistical_in": covered['in'], "removed_statistical_out": covered['out'], "fixed_residual_daily": round(fixed_residual_daily, 2), "residual_mean_in_total": round(float(mean_in.sum()), 2), "residual_mean_out_total": round(float(mean_out.sum()), 2)},
+                  {"step": 4, "title": "Статистическая модель", "model": model_name, "train_info": getattr(model, 'train_info', {}), "industry_profile": inp.industry_profile, "reused_statistical_layer": cache_hit},
+                  {"step": 5, "title": "Монте-Карло", "paths": n_paths, "seed": seed, "horizon_days": H, "level_sigma": round(level_sigma, 4)}])
 
     det = np.zeros((n_paths, H))
     det_in_mean = np.zeros(H)
     det_out_mean = np.zeros(H)
     for ev in events.itertuples():
+        event_seed = int(hashlib.sha256(f"{seed}:{ev.pattern_key}".encode()).hexdigest()[:16], 16)
+        event_rng = np.random.default_rng(event_seed)
         sign = 1.0 if ev.direction == "Поступление" else -1.0
         base_idx = (pd.Timestamp(ev.date) - horizon[0]).days
         if ev.probability < 1.0 or ev.timing_std_days > 0:
-            occurs = rng.random(n_paths) < ev.probability
-            jitter = rng.normal(0, ev.timing_std_days, n_paths).round().astype(int) if ev.timing_std_days > 0 else np.zeros(n_paths, dtype=int)
+            occurs = event_rng.random(n_paths) < ev.probability
+            jitter = event_rng.normal(0, ev.timing_std_days, n_paths).round().astype(int) if ev.timing_std_days > 0 else np.zeros(n_paths, dtype=int)
             idx = np.clip(base_idx + np.maximum(jitter, -base_idx), 0, H)  # сдвиг за горизонт = не пришло
             for p in np.where(occurs & (idx < H))[0]:
                 det[p, idx[p]] += sign * ev.amount
-            exp_idx = min(base_idx, H - 1)
-            (det_in_mean if sign > 0 else det_out_mean)[exp_idx] += ev.amount * ev.probability
+            valid_idx = idx[occurs & (idx < H)]
+            (det_in_mean if sign > 0 else det_out_mean)[:] += np.bincount(valid_idx, minlength=H) * ev.amount / n_paths
         else:
             if 0 <= base_idx < H:
                 det[:, base_idx] += sign * ev.amount
@@ -194,7 +225,8 @@ def run_forecast(inp: ForecastInputs, model: FlowModel | None = None, n_paths: i
         "min_balance_p50": round(float(q[1].min()), 2),
         "prob_gap_any_day": round(float((paths.min(axis=1) < inp.min_balance).mean()), 4),
     }
-    return ForecastResult(as_of, opening, out, events, paths, model_name, inp.scenario, inp.min_balance, quality, components)
+    trace.append({"step": 6, "title": "Остаток и риск", **components, "probability_kind": "uncalibrated_monte_carlo"})
+    return ForecastResult(as_of, opening, out, events, paths, model_name, inp.scenario, inp.min_balance, quality, components, trace)
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +254,7 @@ def _dispersion(daily: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, float]:
     return r_in, r_out, level_sigma
 
 
-def _fixed_residual(ops: pd.DataFrame, daily: pd.DataFrame, events: pd.DataFrame, as_of: pd.Timestamp) -> float:
+def _fixed_residual(ops: pd.DataFrame, daily: pd.DataFrame, events: pd.DataFrame, as_of: pd.Timestamp, horizon: pd.DatetimeIndex) -> float:
     """Среднедневной объём регулярных категорий, который не объяснён ни паттернами, ни налогами."""
     if daily.empty:
         return 0.0
@@ -230,14 +262,10 @@ def _fixed_residual(ops: pd.DataFrame, daily: pd.DataFrame, events: pd.DataFrame
     if len(tail) < 20:
         return 0.0
     fixed_actual_daily = float(tail.outflow_fix.mean())
-    cov_days = max(len(tail), 1)
     # проекция паттернов на тот же период в прошлом ≈ сумма событий горизонта, нормированная на день
     ev = events[(events.direction == "Списание") & events.category.isin(FIXED_CODES)]
-    horizon_bd = max(int(events.date.nunique()) if not events.empty else 0, 1)
-    span_days = (events.date.max() - events.date.min()).days + 1 if not ev.empty else 30
-    bd_in_span = max(int(sum(is_business_day(d) for d in pd.date_range(as_of + pd.Timedelta(days=1), periods=max(span_days, 1)))), 1)
+    bd_in_span = max(sum(is_business_day(d) for d in horizon), 1)
     explained_daily = float(ev.amount.sum() / bd_in_span) if not ev.empty else 0.0
-    del cov_days, horizon_bd
     return max(fixed_actual_daily - explained_daily, 0.0)
 
 
@@ -262,7 +290,7 @@ def _data_quality(ops: pd.DataFrame, daily: pd.DataFrame, as_of: pd.Timestamp, h
     notes = []
     if history_days < 90:
         level = "low"
-        notes.append("Истории меньше 3 месяцев — прогноз опирается на отраслевой профиль, коридор широкий")
+        notes.append("Истории меньше 3 месяцев — используется среднее доступных данных; сезонность и вероятность риска ненадёжны")
     elif history_days < 365:
         level = "medium"
         notes.append("Истории меньше года — сезонность оценена приближённо")

@@ -1,86 +1,77 @@
-import useCompactChart from '../hooks/useCompactChart'
 import ReactECharts from 'echarts-for-react'
 import { useEffect, useState } from 'react'
-import { get } from '../api'
-import { fmtPct } from '../format'
+import { get, post } from '../api'
+import { useAuth } from '../auth'
+import { fmtMoney, fmtPct } from '../format'
 
-const css = (n: string, f: string) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f
-const MODEL_LABELS: Record<string, string> = { naive: 'Наивная (среднее 28 дн.)', seasonal_naive: 'Сезонная наивная (день недели × месяц)', hgb: 'Градиентный бустинг (глобальная модель)' }
+const LABELS: Record<string, string> = { naive: 'Среднее 28 дней', seasonal_naive: 'Сезонная модель', hgb: 'Градиентный бустинг' }
+const number = (n: number | null) => n == null ? '—' : n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })
 
 export default function Quality() {
-  const compact = useCompactChart()
+  const { company } = useAuth()
   const [data, setData] = useState<any>(null)
-  useEffect(() => { get('/backtest/').then(setData) }, [])
-  if (!data) return <div className="empty">Загрузка…</div>
-  if (data.detail) return <><h1>Качество прогноза</h1><div className="card">{data.detail}</div></>
-  const models: any[] = data.summary.models
-  const ink = css('--text-2', '#52514e'), grid = css('--grid', '#e1e0d9'), muted = css('--muted', '#898781'), blue = css('--series-1', '#2a78d6')
-  const barOpt = (key: string, title: string, fmt: (v: number) => string) => ({
-    title: { text: compact ? title.split(' (')[0] : title, left: 0, textStyle: { fontSize: compact ? 11 : 13, color: ink, fontWeight: 600 } },
-    grid: { left: 8, right: compact ? 42 : 60, top: 32, bottom: 8, containLabel: true },
-    xAxis: { type: 'value', show: false },
-    yAxis: { type: 'category', inverse: true, data: models.map((m) => MODEL_LABELS[m.model] ?? m.model), axisLabel: { color: ink, fontSize: 12, width: compact ? 95 : 200, overflow: 'truncate' }, axisLine: { show: false }, axisTick: { show: false } },
-    series: [{ type: 'bar', barWidth: 16, data: models.map((m) => m[key]), itemStyle: { color: blue, borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: ink, fontSize: 11, formatter: (p: any) => (p.value === null ? '—' : fmt(p.value)) } }],
-  })
-  const best = models.find((m) => m.model === 'hgb') ?? models[0]
-  return (
-    <>
-      <div className="page-head"><div><h1>Качество прогноза</h1><p className="subtitle">Rolling-origin бэктест: {data.summary.n_forecasts} прогнозов по {data.summary.n_companies} компаниям, срезы {data.summary.cutoffs?.[0]} … {data.summary.cutoffs?.slice(-1)[0]}, горизонт {data.summary.horizon} дней. Факт сравнивается без «спасательных» вливаний собственника и кредитов.</p></div></div>
-      <div className="grid">
-        <div className="kpi-row">
-          <div className="card stat"><span className="label">Ошибка остатка (медиана, % от месячного оборота)</span><span className="value">{fmtPct(best.mae_norm_median, 1)}</span><span className="hint">{MODEL_LABELS[best.model]}</span></div>
-          <div className="card stat"><span className="label">MASE к «остаток не меняется»</span><span className="value">{best.mase_median}</span><span className="hint">меньше 1 — лучше наивного</span></div>
-          <div className="card stat"><span className="label">Покрытие коридора 10–90%</span><span className="value">{fmtPct(best.coverage80)}</span><span className="hint">цель ≈ 80%</span></div>
-          <div className="card stat"><span className="label">Разрывы: точность / полнота</span><span className="value">{fmtPct(best.gap_precision)} / {fmtPct(best.gap_recall)}</span><span className="hint">упреждение в среднем {best.lead_days_mean ?? '—'} дн.</span></div>
-        </div>
-        <div className="grid grid-2">
-          <div className="card"><ReactECharts notMerge style={{ height: 180 }} option={barOpt('mae_norm_median', 'Ошибка остатка, % от оборота (меньше — лучше)', (v) => fmtPct(v, 1))} /></div>
-          <div className="card"><ReactECharts notMerge style={{ height: 180 }} option={barOpt('gap_f1', 'F1 детекции кассовых разрывов (больше — лучше)', (v) => v.toFixed(2))} /></div>
-        </div>
-        <div className="card">
-          <h2>Сравнение подходов</h2>
-          <table>
-            <thead><tr><th>Модель</th><th className="num">Прогнозов</th><th className="num">MAE / оборот</th><th className="num">MASE</th><th className="num">Покрытие 80%</th><th className="num">Ошибка на конец горизонта</th><th className="num">Precision</th><th className="num">Recall</th><th className="num">F1</th><th className="num">Упреждение, дн.</th><th className="num">Ошибка даты, дн.</th></tr></thead>
-            <tbody>{models.map((m) => <tr key={m.model}><td>{MODEL_LABELS[m.model] ?? m.model}</td><td className="num">{m.n}</td><td className="num">{fmtPct(m.mae_norm_median, 1)}</td><td className="num">{m.mase_median}</td><td className="num">{fmtPct(m.coverage80)}</td><td className="num">{fmtPct(m.end_err_norm_median, 1)}</td><td className="num">{fmtPct(m.gap_precision)}</td><td className="num">{fmtPct(m.gap_recall)}</td><td className="num">{m.gap_f1 ?? '—'}</td><td className="num">{m.lead_days_mean ?? '—'}</td><td className="num">{m.date_err_days_mae ?? '—'}</td></tr>)}</tbody>
-          </table>
-          <p className="small muted">Реальных разрывов в тестовых срезах: {fmtPct(data.summary.actual_gap_rate)} случаев. Матрица для {MODEL_LABELS[best.model]}: TP {best.confusion.tp}, FP {best.confusion.fp}, FN {best.confusion.fn}, TN {best.confusion.tn}.</p>
-        </div>
-        <div className="grid grid-2">
-          <div className="card">
-            <h2>Калибровка вероятности разрыва</h2>
-            <p className="small muted">Если сервис говорит «60–80%», разрыв должен случаться примерно в 70% таких случаев.</p>
-            <table><thead><tr><th>Предсказанная вероятность</th><th className="num">Фактическая доля</th><th className="num">Случаев</th></tr></thead><tbody>{best.calibration.map((c: any) => <tr key={c.bin}><td>{c.bin}</td><td className="num">{fmtPct(c.actual_rate)}</td><td className="num">{c.n}</td></tr>)}</tbody></table>
-          </div>
-          <div className="card">
-            <h2>Категоризация операций</h2>
-            {data.categorizer_metrics?.manual ? (
-              <>
-                <p className="small muted">Честная оценка: {data.categorizer_metrics.manual.n} операций размечены вручную. {data.categorizer_metrics.manual.sampling}.</p>
-                <table>
-                  <thead><tr><th>Вариант</th><th className="num">Accuracy</th><th className="num">Macro-F1</th><th className="num">Ошибок</th></tr></thead>
-                  <tbody>
-                    {[['rules_only', 'Только правила'], ['rules_counterparty', 'Правила + контрагент'], ['full_pipeline', 'Правила + контрагент + ML']].map(([k, l]) => { const m = data.categorizer_metrics.manual[k]; return m ? <tr key={k}><td>{l}</td><td className="num"><b>{fmtPct(m.accuracy, 1)}</b></td><td className="num">{m.macro_f1}</td><td className="num">{m.errors}</td></tr> : null })}
-                  </tbody>
-                </table>
-                {data.categorizer_metrics.manual.error_examples?.length > 0 && (
-                  <details style={{ marginTop: 8 }}>
-                    <summary className="small muted" style={{ cursor: 'pointer' }}>Примеры ошибок полного пайплайна ({data.categorizer_metrics.manual.full_pipeline?.errors})</summary>
-                    <table className="small"><tbody>{data.categorizer_metrics.manual.error_examples.map((e: any, i: number) => <tr key={i}><td>{e.counterparty}</td><td>{e.purpose}</td><td>{e.label} → <span className="neg">{e.predicted}</span></td></tr>)}</tbody></table>
-                  </details>
-                )}
-              </>
-            ) : <p className="small muted">Ручная разметка не выполнена (manage.py evaluate_categorizer).</p>}
-            <p className="small muted" style={{ marginTop: 10 }}>Согласие ML с правилами на отложенной выборке (не является честной метрикой, показывает лишь, что модель воспроизводит правила):</p>
-            {Object.entries(data.categorizer_metrics ?? {}).filter(([k]) => k !== 'manual').map(([dir, m]: any) => <div key={dir} className="row small" style={{ justifyContent: 'space-between', padding: '4px 0', borderTop: `1px solid ${grid}` }}><span>{dir === 'in' ? 'Поступления' : 'Списания'}</span><span>accuracy {fmtPct(m.accuracy, 1)} · macro-F1 {m.macro_f1} · классов {m.classes.length} · тест {m.test_rows}</span></div>)}
-          </div>
-        </div>
-        <div className="card">
-          <h2>По отраслям ({MODEL_LABELS[best.model]})</h2>
-          <table><thead><tr><th>Отрасль</th><th className="num">Прогнозов</th><th className="num">MAE / оборот</th><th className="num">MASE</th><th className="num">Покрытие</th><th className="num">Доля разрывов</th></tr></thead>
-            <tbody>{data.summary.by_industry.filter((r: any) => r.model === best.model).map((r: any) => <tr key={r.industry}><td>{r.industry}</td><td className="num">{r.n}</td><td className="num">{fmtPct(r.mae_norm, 1)}</td><td className="num">{r.mase}</td><td className="num">{fmtPct(r.coverage80)}</td><td className="num">{fmtPct(r.gap_rate)}</td></tr>)}</tbody></table>
-        </div>
-        <div className="small muted" style={{ color: muted }}>Запуск: python manage.py train_models --train-until {data.config.test_start} && python manage.py run_backtest</div>
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [selected, setSelected] = useState('hgb')
+  useEffect(() => {
+    let active = true
+    if (company) get('/backtest/', { company_id: company.id }).then(d => { if (active) setData(d) }).catch(() => { if (active) setError('Не удалось загрузить результаты') })
+    return () => { active = false }
+  }, [company?.id])
+  const evaluate = async () => {
+    if (!company) return
+    setBusy(true); setError('')
+    try { setData(await post('/backtest/', { company_id: company.id })) }
+    catch (e: any) { setError(e?.response?.data?.detail || 'Не удалось выполнить проверку') }
+    finally { setBusy(false) }
+  }
+  const models: any[] = data?.summary?.models ?? []
+  const best = models.find(m => m.model === selected) ?? models[0]
+  return <>
+    <div className="page-head"><div><h1>Качество прогноза</h1><p className="subtitle">Проверка на истории компании «{company?.name}». Каждый прогноз использует только данные, доступные на дату его среза.</p></div>
+      <button onClick={evaluate} disabled={busy || !company}>{busy ? 'Вычисляем исторические прогнозы…' : 'Проверить текущие данные'}</button></div>
+    {error && <div className="card error">{error}</div>}
+    {busy && <p role="status">Расчёт может занять несколько минут. Для проверки нужны 120 дней истории и 30 дней известного факта. Результат будет сохранён.</p>}
+    {!data && !error && <div className="empty">Загрузка…</div>}
+    {data?.detail && <div className="card">{data.detail}</div>}
+    {data?.stale && <div className="card error">После проверки данные изменились. Запустите оценку заново.</div>}
+    {data?.config?.warnings?.map((w: string) => <p key={w} className="muted">{w}</p>)}
+    {data?.summary && !models.length && <div className="card">Недостаточно полного факта для выбранного горизонта. Метрики не вычислены.</div>}
+    {best && <div className="grid">
+      <div className="card">
+        <p>{data.summary.n_forecasts} прогнозов; срезы {data.summary.cutoffs[0]} … {data.summary.cutoffs.slice(-1)[0]}; горизонт {data.summary.horizon} дней. Факт: {data.config.actual_mode === 'without_financing' ? 'остаток без финансирования после среза' : 'реальный остаток из выписки'}.</p>
+        <p className="small muted">Accuracy, Precision, Recall и F1 относятся к обнаружению кассового разрыва в течение горизонта. Порог классификации — {fmtPct(data.config.gap_prob_threshold)}. Невычислимые показатели обозначены «—».</p>
+        <div className="toolbar"><label className="field">Модель для подробного просмотра<select value={best.model} onChange={e => setSelected(e.target.value)}>{models.map(m => <option key={m.model} value={m.model}>{LABELS[m.model] ?? m.model}</option>)}</select></label>
+          <button className="secondary" onClick={() => {
+            const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+            const a = document.createElement('a'); a.href = url; a.download = `quality-${company?.code}.json`; a.click(); URL.revokeObjectURL(url)
+          }}>Скачать метрики и параметры</button></div>
       </div>
-    </>
-  )
+      <div className="kpi-row">
+        <div className="card stat"><span className="label">MAE остатка</span><span className="value">{fmtMoney(best.mae_balance)}</span><span className="hint">средняя абсолютная ошибка</span></div>
+        <div className="card stat"><span className="label">Accuracy разрывов</span><span className="value">{fmtPct(best.gap_accuracy, 1)}</span><span className="hint">доля верных классификаций</span></div>
+        <div className="card stat"><span className="label">Precision / Recall</span><span className="value">{fmtPct(best.gap_precision)} / {fmtPct(best.gap_recall)}</span><span className="hint">F1: {best.gap_f1 ?? '—'}</span></div>
+        <div className="card stat"><span className="label">Покрытие интервала 10–90%</span><span className="value">{fmtPct(best.coverage80)}</span><span className="hint">номинальное покрытие — 80%</span></div>
+      </div>
+      <div className="card" style={{ overflowX: 'auto' }}><h2>Сравнение моделей</h2>
+        <table><thead><tr>{['Модель', 'Прогнозов', 'MAE, ₽', 'MSE, ₽²', 'RMSE, ₽', 'MAE / оборот', 'MASE', 'К постоянному остатку', 'Accuracy', 'Precision', 'Recall', 'F1'].map(h => <th key={h}>{h}</th>)}</tr></thead>
+          <tbody>{models.map(m => <tr key={m.model}><td>{LABELS[m.model] ?? m.model}</td><td>{m.n}</td><td>{number(m.mae_balance)}</td><td>{number(m.mse_balance)}</td><td>{number(m.rmse_balance)}</td><td>{fmtPct(m.mae_norm_median, 1)}</td><td>{number(m.mase_median)}</td><td>{number(m.naive_mae_ratio_median)}</td><td>{fmtPct(m.gap_accuracy, 1)}</td><td>{fmtPct(m.gap_precision)}</td><td>{fmtPct(m.gap_recall)}</td><td>{m.gap_f1 ?? '—'}</td></tr>)}</tbody></table>
+        <p className="small muted">MASE нормирует ошибку на среднее абсолютное дневное изменение остатка в обучающей истории. Столбец «К постоянному остатку» сравнивает MAE с прогнозом неизменного остатка на том же горизонте: меньше 1 — лучше. MAE, MSE и RMSE усредняются по всем дням и срезам; нормированные ошибки представлены медианой по срезам.</p>
+      </div>
+      <div className="grid grid-2">
+        <div className="card"><h2>Матрица ошибок: {LABELS[best.model]}</h2>
+          <table><thead><tr><th>Факт / прогноз</th><th>Разрыв</th><th>Нет разрыва</th></tr></thead><tbody>
+            <tr><th>Разрыв</th><td>TP: {best.confusion.tp}</td><td>FN: {best.confusion.fn}</td></tr>
+            <tr><th>Нет разрыва</th><td>FP: {best.confusion.fp}</td><td>TN: {best.confusion.tn}</td></tr></tbody></table>
+          <p>Доля фактических разрывов: {fmtPct(data.summary.actual_gap_rate)}. Упреждение верно обнаруженных разрывов: {best.lead_days_mean ?? '—'} дн. Ошибка даты: {best.date_err_days_mae ?? '—'} дн.</p>
+        </div>
+        <div className="card"><h2>Проверка вероятностей</h2><p className="small muted">Вероятности получены симуляцией. Таблица показывает, насколько они согласуются с фактом; автоматическая калибровка на этом тестовом наборе не применяется. Brier score: {best.brier_score} (меньше — лучше).</p>
+          <table><thead><tr><th>Вероятность</th><th>Доля разрывов</th><th>Случаев</th></tr></thead><tbody>{best.calibration.map((c: any) => <tr key={c.bin}><td>{c.bin}</td><td>{fmtPct(c.actual_rate)}</td><td>{c.n}</td></tr>)}</tbody></table>
+        </div>
+      </div>
+      <div className="card"><h2>Ошибка прогноза относительно оборота</h2><ReactECharts notMerge style={{ height: 220 }} option={{ tooltip: { trigger: 'axis' }, grid: { containLabel: true, left: 10, right: 25 }, xAxis: { type: 'category', data: models.map(m => LABELS[m.model]) }, yAxis: { type: 'value', name: '%' }, series: [{ type: 'bar', data: models.map(m => +(100 * m.mae_norm_median).toFixed(2)), itemStyle: { color: '#2a78d6' } }] }} /></div>
+      <details className="card"><summary>Происхождение данных и параметры проверки</summary><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(data.config, null, 2)}</pre></details>
+      <p className="small muted">Оценка категорий операций требует отдельной ручной разметки. Результаты на ранее использованных для настройки 300 примерах не являются независимой оценкой контрольного набора.</p>
+    </div>}
+  </>
 }
