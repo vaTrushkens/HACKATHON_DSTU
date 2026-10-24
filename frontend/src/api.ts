@@ -51,4 +51,5 @@ export async function login(username: string, password: string) {
 export const get = <T = any>(url: string, params?: any) => api.get<T>(url, { params }).then((r) => r.data)
 export const post = <T = any>(url: string, body?: any, params?: any) => api.post<T>(url, body, { params }).then((r) => r.data)
 export const patch = <T = any>(url: string, body?: any) => api.patch<T>(url, body).then((r) => r.data)
+export const put = <T = any>(url: string, body?: any) => api.put<T>(url, body).then((r) => r.data)
 export const del = (url: string) => api.delete(url)

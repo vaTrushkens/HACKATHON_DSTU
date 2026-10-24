@@ -357,6 +357,13 @@ input.range-input { z-index: 1; }
 .select-menu::-webkit-scrollbar-thumb { background: var(--muted); border: 1px solid var(--surface-2); border-radius: 4px; }
 .select-option { min-height: 40px; user-select: none; -webkit-tap-highlight-color: transparent; }
 
+/* Источники данных: формы ключей и импорт файлов */
+.source-config { display: grid; gap: 10px; margin: 12px 0; padding: 12px; border-radius: 8px; background: var(--surface-2); }
+.source-config input { min-height: 38px !important; padding: 8px 12px !important; font-size: 13px; }
+.source-import { align-items: flex-end; margin-top: 12px; }
+.source-import .field { min-width: 0; }
+.source-import .select-control { min-width: 260px; }
+
 /* Ассистент: плавающая кнопка и панель чата */
 .chat-fab { position: fixed; right: 24px; bottom: 24px; z-index: 900; width: 56px; height: 56px; min-height: 0; padding: 0; border-radius: 50%; box-shadow: 0 6px 20px rgba(0, 0, 0, .25); }
 .chat-panel { position: fixed; right: 24px; bottom: 92px; z-index: 900; display: flex; flex-direction: column; width: min(400px, calc(100vw - 32px)); height: min(640px, calc(100vh - 120px)); border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: 0 16px 48px rgba(0, 0, 0, .3); overflow: hidden; }
@@ -384,6 +391,8 @@ input.range-input { z-index: 1; }
 .chat-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .chat-tools span { padding: 2px 6px; border-radius: 4px; background: var(--brand-soft); color: var(--brand); font-size: 11px; }
 .chat-typing { align-self: flex-start; color: var(--muted); font-size: 12px; }
+.chat-msg-empty { display: none; }
+.chat-cursor { display: inline-block; width: 7px; height: 14px; margin-left: 2px; vertical-align: -2px; background: var(--brand); animation: chat-pulse 0.9s ease-in-out infinite; }
 .chat-quick { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px; }
 .chat-quick button { min-height: 30px; padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 400; }
 .chat-form { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--grid); }

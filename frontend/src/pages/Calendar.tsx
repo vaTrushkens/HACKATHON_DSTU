@@ -1,9 +1,9 @@
 import RangeField from '../components/RangeField'
 import Select from '../components/Select'
 import { useEffect, useState } from 'react'
-import { del, get, patch, post } from '../api'
+import { del, get, patch, post, put } from '../api'
 import { useAuth } from '../auth'
-import { PERIOD_LABELS, fmtDate, fmtMoney, fmtPct, sourceLabel } from '../format'
+import { MODE_LABELS, PERIOD_LABELS, fmtDate, fmtMoney, fmtPct, sourceLabel } from '../format'
 import type { Category, Contract, PlannedEvent, RecurringPattern } from '../types'
 
 type Tab = 'recurring' | 'events' | 'contracts' | 'taxes' | 'integrations'
@@ -23,6 +23,9 @@ export default function Calendar() {
   const [contracts, setContracts] = useState<Contract[]>([])
   const [cform, setCform] = useState<any>(emptyContract)
   const [msg, setMsg] = useState('')
+  const [cfg, setCfg] = useState<Record<string, Record<string, string>>>({})
+  const [imp, setImp] = useState({ direction: 'auto', deferral_days: 14, fee_pct: 2 })
+  const [busySource, setBusySource] = useState('')
 
   const loadAll = async () => {
     if (!company) return
@@ -60,7 +63,36 @@ export default function Calendar() {
     } catch (err: any) { setMsg(JSON.stringify(err?.response?.data ?? 'Ошибка')) }
   }
   const cancelEvent = async (id: number) => { await del(`/companies/${company.id}/events/${id}/`); loadAll() }
-  const sync = async (source: string) => { const r = await post(`/companies/${company.id}/integrations/`, { source }); setMsg(`Синхронизация «${source}»: ${JSON.stringify(r)}`); loadAll() }
+  const fail = (err: any) => setMsg(err?.response?.data?.detail || JSON.stringify(err?.response?.data ?? 'Ошибка'))
+  const sync = async (source: string) => {
+    setBusySource(source)
+    try {
+      const r = await post(`/companies/${company.id}/integrations/`, { source })
+      const mode = r.mode === 'api' ? 'через API' : r.mode === 'derived' ? 'восстановлено из выписки' : r.mode === 'mock' ? 'по заглушке' : ''
+      setMsg(source === 'registry' ? `Проверка реестра ${mode}: вероятность оплаты снижена у ${r.updated_invoices} счетов` : `Синхронизация «${sourceLabel(source)}» ${mode}: событий в прогнозе ${r.events}${r.total ? `, ожидается ${fmtMoney(r.total)}` : ''}`)
+      loadAll()
+    } catch (err) { fail(err) } finally { setBusySource('') }
+  }
+  const saveConfig = async (kind: string) => {
+    try { const r = await put(`/companies/${company.id}/integrations/${kind}/config/`, { config: cfg[kind] ?? {} }); setMsg(r.configured ? 'Ключи сохранены — можно синхронизировать' : 'Ключи сохранены, но для подключения заполнены не все поля'); setCfg({ ...cfg, [kind]: {} }); loadAll() } catch (err) { fail(err) }
+  }
+  const clearConfig = async (kind: string) => { await del(`/companies/${company.id}/integrations/${kind}/config/`); setMsg('Ключи удалены'); loadAll() }
+  const testKeys = async (source: string) => {
+    setBusySource(source)
+    try { const r = await post(`/companies/${company.id}/integrations/`, { source, action: 'test' }); setMsg(`${r.ok ? '✓' : '✗'} ${sourceLabel(source)}: ${r.detail}`) } catch (err) { fail(err) } finally { setBusySource('') }
+  }
+  const importFile = async (source: string, action: string, file: File) => {
+    const fd = new FormData(); fd.append('file', file)
+    if (action === 'import_invoices') { fd.append('direction', imp.direction); fd.append('deferral_days', String(imp.deferral_days)) } else fd.append('fee_pct', String(imp.fee_pct))
+    setBusySource(source)
+    try {
+      const r = await post(`/companies/${company.id}/import/${action === 'import_invoices' ? 'invoices' : 'ofd'}/`, fd)
+      setMsg(action === 'import_invoices'
+        ? `Импорт (${sourceLabel(r.source)}): документов ${r.rows_total}, добавлено в прогноз ${r.created} (поступлений ${r.incoming}, списаний ${r.outgoing}), уже были ${r.duplicates}${r.direction_default ? `, у ${r.direction_default} направление не определено — принято «поступление»` : ''}${r.skipped ? `, пропущено без даты/суммы ${r.skipped}` : ''}`
+        : `Отчёт ОФД: дней ${r.days}, безнал ${fmtMoney(r.card_total)}, наличные ${fmtMoney(r.cash_total)} (на счёт не попадают) → зачислений в прогноз ${r.created}, уже в выписке ${r.already_in_statement}, повторов ${r.duplicates}`)
+      loadAll()
+    } catch (err) { fail(err) } finally { setBusySource('') }
+  }
   const refreshStatuses = async () => { const r = await post(`/companies/${company.id}/events/refresh-status/`); setMsg(`Сверка с фактом: исполнено ${r.matched}, просрочено ${r.overdue}`); loadAll() }
 
   const active = patterns.filter((p) => p.active)
@@ -187,15 +219,58 @@ export default function Calendar() {
       )}
 
       {tab === 'integrations' && (
-        <div className="grid grid-2">
-          {integrations.map((s) => (
-            <div key={s.source} className="card">
-              <div className="row" style={{ justifyContent: 'space-between' }}><h2 style={{ margin: 0 }}>{s.title}</h2><span className={`badge ${s.status === 'active' ? 'good' : 'info'}`}>{s.kind === 'internal' ? 'внутренняя' : s.kind === 'external' ? 'внешняя' : 'ручная'} · {s.status === 'mock' ? 'прототип' : s.status}</span></div>
-              <p className="muted">{s.description}</p>
-              <div className="row"><span className="small muted">событий в прогнозе: {s.events}</span>{(s.source === 'bank' || s.source === 'registry') && <button className="secondary" onClick={() => sync(s.source)}>Синхронизировать</button>}</div>
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="card tight small muted" style={{ marginBottom: 12 }}>
+            Ключи API хранятся по компании и наружу не показываются. Файлы: 1С — CommerceML или таблица счетов (CSV/XLSX), ЭДО — УПД XML формата ФНС, ОФД — отчёт по сменам или чекам. Примеры в <code>data/samples/</code>.
+          </div>
+          <div className="grid grid-2">
+            {integrations.map((s) => {
+              const [modeLabel, modeClass] = MODE_LABELS[s.mode] ?? [s.mode, 'info']
+              const kindLabel = s.kind === 'internal' ? 'внутренняя' : s.kind === 'external' ? 'внешняя' : 'ручная'
+              return (
+                <div key={s.source} className="card">
+                  <div className="row" style={{ justifyContent: 'space-between' }}><h2 style={{ margin: 0 }}>{s.title}</h2><span className={`badge ${modeClass}`}>{kindLabel} · {modeLabel}</span></div>
+                  <p className="muted">{s.description}</p>
+                  {s.fields && (
+                    <form className="source-config" onSubmit={(e) => { e.preventDefault(); saveConfig(s.config) }}>
+                      {s.fields.map((f: any) => (
+                        <label key={f.name} className="field">{f.label}
+                          <input type={f.name === 'base_url' ? 'url' : 'password'} autoComplete="off" value={cfg[s.config]?.[f.name] ?? ''} placeholder={s.values?.[f.name] || 'не задано'} onChange={(e) => setCfg({ ...cfg, [s.config]: { ...(cfg[s.config] ?? {}), [f.name]: e.target.value } })} />
+                        </label>
+                      ))}
+                      <div className="row">
+                        <button className="secondary" type="submit">Сохранить ключи</button>
+                        {s.configured && <button type="button" className="secondary" disabled={busySource === s.source} onClick={() => testKeys(s.source)}>Проверить ключ</button>}
+                        {s.configured && <button type="button" className="ghost" onClick={() => clearConfig(s.config)}>Удалить</button>}
+                        {s.last_sync && <span className={`small ${s.last_status === 'error' ? 'error' : 'muted'}`} title={s.last_error}>{s.last_status === 'error' ? 'ошибка синхронизации' : 'синхронизировано'} {fmtDate(s.last_sync)}</span>}
+                      </div>
+                      {s.last_status === 'error' && s.last_error && <div className="small error">{s.last_error}</div>}
+                    </form>
+                  )}
+                  {s.actions.includes('import_invoices') && (
+                    <div className="row source-import">
+                      <label className="field">Чьи документы
+                        <Select value={imp.direction} onValueChange={(value) => setImp({ ...imp, direction: value })}><option value="auto">Определить по ИНН / роли</option><option value="in">Выставлены нами — нам заплатят</option><option value="out">Получены от поставщиков — платим мы</option></Select>
+                      </label>
+                      <label className="field">Отсрочка, дн.<input type="number" min={0} max={180} value={imp.deferral_days} onChange={(e) => setImp({ ...imp, deferral_days: Number(e.target.value) })} style={{ width: 110 }} /></label>
+                      <label className="btn secondary" style={{ cursor: 'pointer' }}>{busySource === s.source ? 'Загружаем…' : 'Импорт файла'}<input type="file" accept=".xml,.csv,.xlsx,.xls,.txt" hidden onChange={(e) => e.target.files?.[0] && importFile(s.source, 'import_invoices', e.target.files[0])} /></label>
+                    </div>
+                  )}
+                  {s.actions.includes('import_ofd') && (
+                    <div className="row source-import">
+                      <label className="field">Комиссия эквайринга, %<input type="number" min={0} max={10} step={0.1} value={imp.fee_pct} onChange={(e) => setImp({ ...imp, fee_pct: Number(e.target.value) })} style={{ width: 110 }} /></label>
+                      <label className="btn secondary" style={{ cursor: 'pointer' }}>{busySource === s.source ? 'Загружаем…' : 'Импорт отчёта'}<input type="file" accept=".csv,.xlsx,.xls,.txt" hidden onChange={(e) => e.target.files?.[0] && importFile(s.source, 'import_ofd', e.target.files[0])} /></label>
+                    </div>
+                  )}
+                  <div className="row" style={{ marginTop: 10 }}>
+                    <span className="small muted">событий в прогнозе: {s.events}</span>
+                    {s.actions.includes('sync') && <button className="secondary" disabled={busySource === s.source} onClick={() => sync(s.source)}>{busySource === s.source ? 'Синхронизируем…' : s.source === 'registry' ? 'Проверить контрагентов' : 'Синхронизировать'}</button>}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </>
       )}
     </>
   )

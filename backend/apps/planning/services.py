@@ -14,8 +14,13 @@ from cashflow_core.recurring import RecurringPattern as CorePattern
 from cashflow_core.recurring import counterparty_payment_delays, detect_recurring
 from cashflow_core.taxes import detect_regime, tax_calendar
 
+from django.utils import timezone
+
+from .connectors import ConnectorError, connector
 from .integrations import BankAdapter, RegistryAdapter
-from .models import CounterpartyCheck, PlannedEvent, RecurringPattern
+from .models import CounterpartyCheck, IntegrationConfig, PlannedEvent, RecurringPattern
+
+CHECK_TTL = pd.Timedelta(days=30)
 
 log = logging.getLogger(__name__)
 EVENT_COLS = ["date", "amount", "direction", "category", "label", "counterparty_name", "source", "confidence", "pattern_key", "probability", "timing_std_days"]
@@ -146,7 +151,6 @@ def counterparties_overview(company: Company, as_of: pd.Timestamp) -> dict:
         return {"clients": [], "suppliers": []}
     hist = ops[(ops.operation_date <= as_of) & (ops.operation_date > as_of - pd.Timedelta(days=182))]
     delays = counterparty_payment_delays(ops[ops.operation_date <= as_of]).set_index("cp_key") if len(ops) else pd.DataFrame()
-    registry = RegistryAdapter()
     out = {}
     for key, direction in (("clients", "Поступление"), ("suppliers", "Списание")):
         sub = hist[(hist.direction == direction) & ~hist.category.isin(["OWNER_IN", "OWNER_OUT", "LOAN_IN", "LOAN_OUT", "TAXES", "SALARY", "BANK_FEES", "REV_ACQUIRING", "REV_CASH"])]
@@ -156,7 +160,7 @@ def counterparties_overview(company: Company, as_of: pd.Timestamp) -> dict:
         for r in g.itertuples():
             cp_key = r.counterparty_inn or f"name:{r.counterparty_name.lower()}"
             d = delays.loc[cp_key] if (len(delays) and cp_key in delays.index) else None
-            check = _cached_check(registry, r.counterparty_inn, r.counterparty_name) if key == "clients" else None
+            check = check_counterparty(company, r.counterparty_inn, r.counterparty_name) if key == "clients" else None
             rows.append(
                 {
                     "inn": r.counterparty_inn, "name": r.counterparty_name, "total_6m": round(float(r.total), 2), "share": round(float(r.total) / total_all, 3), "n": int(r.n), "last_date": str(r.last_date.date()),
@@ -167,27 +171,56 @@ def counterparties_overview(company: Company, as_of: pd.Timestamp) -> dict:
     return out
 
 
-def _cached_check(registry: RegistryAdapter, inn: str, name: str) -> dict:
+def check_counterparty(company: Company, inn: str, name: str) -> dict:
+    """Статус контрагента: DaData (ЕГРЮЛ/ЕГРИП), если есть ключ, иначе детерминированная заглушка. Кэш 30 дней."""
+    client = connector(company, "dadata")
+    provider = client.provider if client.configured else "mock"
     if not inn:
-        return registry.check(inn, name)
+        return {**RegistryAdapter().check(inn, name), "provider": provider}
     rec = CounterpartyCheck.objects.filter(inn=inn).first()
-    if rec is None:
-        res = registry.check(inn, name)
-        rec = CounterpartyCheck.objects.create(inn=inn, name=name[:255], status=res["status"], risk_level=res["risk_level"], tax_debt=res["tax_debt"], details=res, provider=res.get("provider", "mock"))
-    return {"status": rec.status, "risk_level": rec.risk_level, "tax_debt": rec.tax_debt, "pay_probability": rec.details.get("pay_probability", 0.9), "checked_at": rec.checked_at.isoformat()}
+    stale = rec is None or rec.provider != provider or (timezone.now() - rec.checked_at) > CHECK_TTL
+    if stale:
+        try:
+            res = client.check(inn, name) if client.configured else RegistryAdapter().check(inn, name)
+        except ConnectorError as e:
+            log.warning("registry check failed for %s: %s", inn, e)
+            if rec is None:
+                res = {**RegistryAdapter().check(inn, name), "provider": "mock", "error": str(e)}
+            else:
+                res = None
+        if res is not None:
+            rec, _ = CounterpartyCheck.objects.update_or_create(inn=inn, defaults={"name": (res.get("name") or name)[:255], "status": res["status"], "risk_level": res["risk_level"], "tax_debt": res.get("tax_debt", False), "details": res, "provider": res.get("provider", "mock")})
+    return {"status": rec.status, "risk_level": rec.risk_level, "tax_debt": rec.tax_debt, "pay_probability": rec.details.get("pay_probability", 0.9), "checked_at": rec.checked_at.isoformat(), "provider": rec.provider, "name": rec.name}
 
 
-@transaction.atomic
-def sync_bank(company: Company, as_of: pd.Timestamp, horizon_days: int) -> int:
-    """Имитация внутренней интеграции с банком: события помечаются источником ``bank``."""
+def _mark_sync(company: Company, kind: str, error: str = "") -> None:
+    IntegrationConfig.objects.update_or_create(company=company, kind=kind, defaults={"last_sync": timezone.now(), "last_status": "error" if error else "ok", "last_error": error[:2000]})
+
+
+def _replace_events(company: Company, source: str, events: list[dict]) -> int:
+    with transaction.atomic():  # атомарна только замена событий: статус ошибки коннектора должен сохраниться при исключении
+        PlannedEvent.objects.filter(company=company, source=source, status="expected").delete()
+        objs = [PlannedEvent(company=company, **{k: (Decimal(str(v)) if k == "amount" else v) for k, v in e.items()}) for e in events]
+        PlannedEvent.objects.bulk_create(objs)
+    return len(objs)
+
+
+def sync_bank(company: Company, as_of: pd.Timestamp, horizon_days: int) -> dict:
+    """События банка: из API по контракту ``BankClient``, если он настроен, иначе восстановление из выписки."""
+    end = as_of + pd.Timedelta(days=horizon_days)
+    client = connector(company, "bank")
+    if client.configured:
+        try:
+            events = client.events(company.inn, as_of.date(), end.date())
+        except ConnectorError as e:
+            _mark_sync(company, "bank", str(e))
+            raise
+        _mark_sync(company, "bank")
+        return {"mode": "api", "events": _replace_events(company, "bank", events)}
     ops = ops_services.ops_frame(company)
     # как и в прогнозе: для даты «в прошлом» паттерны берём только из данных до as_of
     patterns = detect_recurring(ops[ops.operation_date <= as_of], as_of) if (len(ops) and as_of < ops.operation_date.max() - pd.Timedelta(days=7)) else core_patterns(company)
-    events = BankAdapter().sync(patterns, as_of, as_of + pd.Timedelta(days=horizon_days))
-    PlannedEvent.objects.filter(company=company, source="bank", status="expected").delete()
-    objs = [PlannedEvent(company=company, **{k: (Decimal(str(v)) if k == "amount" else v) for k, v in e.items()}) for e in events]
-    PlannedEvent.objects.bulk_create(objs)
-    return len(objs)
+    return {"mode": "derived", "events": _replace_events(company, "bank", BankAdapter().sync(patterns, as_of, end))}
 
 
 @transaction.atomic
@@ -229,10 +262,9 @@ def generate_contract_events(contract) -> int:
 
 def apply_registry_to_invoices(company: Company) -> int:
     """Снижает вероятность оплаты по счетам клиентов с проблемным статусом в реестре."""
-    registry = RegistryAdapter()
     n = 0
     for e in PlannedEvent.objects.filter(company=company, kind="invoice_in", status="expected"):
-        check = _cached_check(registry, e.counterparty_inn, e.counterparty_name)
+        check = check_counterparty(company, e.counterparty_inn, e.counterparty_name)
         prob = min(e.probability, check["pay_probability"])
         if prob != e.probability:
             e.probability = prob

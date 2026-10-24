@@ -81,7 +81,7 @@ def test_upload_forecast_events_flow(client_and_company):
     assert sc["delta"]["end_balance_p50"] < 0
 
     ctx = c.get(f"/api/companies/{company.id}/assistant/context/").data
-    assert ctx["enabled"] is False and len(ctx["context"]["tools"]) >= 4
+    assert isinstance(ctx["enabled"], bool) and ctx["model"] and len(ctx["context"]["tools"]) >= 4  # enabled зависит от доступности Ollama в окружении
 
 
 def test_contract_generates_schedule_and_affects_forecast(client_and_company):

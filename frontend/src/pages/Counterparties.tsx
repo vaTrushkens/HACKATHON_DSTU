@@ -20,7 +20,7 @@ export default function Counterparties() {
           <td>{fmtDate(r.last_date)}</td>
           {clients && <>
             <td className="num">{r.median_delay !== null ? <>{Math.round(r.median_delay)} дн. <span className="small muted">(до {Math.round(r.p90_delay)})</span></> : <span className="muted">—</span>}</td>
-            <td>{r.registry && <span className={`badge ${r.registry.risk_level === 'high' ? 'high' : r.registry.risk_level === 'medium' ? 'medium' : 'good'}`}>{r.registry.status}</span>}</td>
+            <td>{r.registry && <span className={`badge ${r.registry.risk_level === 'high' ? 'high' : r.registry.risk_level === 'medium' ? 'medium' : 'good'}`} title={r.registry.provider === 'dadata' ? 'ЕГРЮЛ/ЕГРИП через DaData' : 'заглушка реестра — подключите DaData в «Календарь платежей → Источники данных»'}>{r.registry.status}{r.registry.provider !== 'dadata' && ' *'}</span>}</td>
           </>}
         </tr>
       ))}</tbody>

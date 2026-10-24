@@ -106,12 +106,18 @@ FORECAST_DEFAULT_HORIZON = int(os.getenv("FORECAST_DEFAULT_HORIZON", "60"))
 FORECAST_N_PATHS = int(os.getenv("FORECAST_N_PATHS", "1000"))
 DATASET_DIR = os.getenv("DATASET_DIR", str(PROJECT_DIR.parent / "cashflow_dataset_participants"))
 
+# ---- внешние интеграции: ключи по умолчанию для всех компаний (по компании задаются в интерфейсе) ----
+DADATA_API_KEY = os.getenv("DADATA_API_KEY", "")
+BANK_API_URL = os.getenv("BANK_API_URL", "")
+BANK_API_TOKEN = os.getenv("BANK_API_TOKEN", "")
+
 # ---- LLM-ассистент: локальная модель через Ollama (чат на сайте и Telegram-бот) ----
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemma4:e4b")
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))  # CPU-инференс: ответ с инструментами может занять десятки секунд
 LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "8192"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "260"))  # предел длины ответа: 2–4 предложения, без «простыней»
 LLM_MODE = os.getenv("LLM_MODE", "router")  # router — выбор инструмента структурированным JSON (быстро, для компактных моделей); native — нативный function calling (модели от ~8B)
 LLM_THINK = os.getenv("LLM_THINK", "1") == "1"  # размышления в режиме native: надёжнее вызывает инструменты, но ~2× дольше
 

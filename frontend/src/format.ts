@@ -22,7 +22,9 @@ export const daysBetween = (a: string, b: string) => Math.round((new Date(b).get
 export const addDays = (s: string, n: number) => { const d = new Date(s); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10) }
 
 export const SOURCE_LABELS: Record<string, string> = {
-  recurring: 'из выписки', tax_calendar: 'налоговый календарь', manual: 'ручной ввод', 'invoice:1c': 'счёт (1С/ЭДО)', bank: 'данные банка', scenario: 'сценарий', registry: 'реестр', contract: 'договор', industry_profile: 'отраслевой профиль',
+  recurring: 'из выписки', tax_calendar: 'налоговый календарь', manual: 'ручной ввод', 'invoice:1c': 'счёт (1С/ЭДО)', '1c': 'счёт из 1С', edo: 'УПД из ЭДО', ofd: 'отчёт ОФД',
+  bank: 'данные банка', scenario: 'сценарий', registry: 'реестр', contract: 'договор', industry_profile: 'отраслевой профиль',
 }
+export const MODE_LABELS: Record<string, [string, string]> = { api: ['API подключён', 'good'], derived: ['восстановлено из выписки', 'info'], mock: ['не подключено — нет ключа', 'medium'], file: ['импорт файла', 'info'], active: ['активно', 'good'] }
 export const sourceLabel = (s: string) => SOURCE_LABELS[s] ?? s
 export const PERIOD_LABELS: Record<string, string> = { weekly: 'еженедельно', biweekly: 'раз в 2 недели', monthly: 'ежемесячно', quarterly: 'ежеквартально' }

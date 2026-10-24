@@ -1,4 +1,7 @@
+import json
+
 from django.conf import settings
+from django.http import StreamingHttpResponse
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -37,11 +40,23 @@ class AssistantChatView(APIView):
         return Response({"messages": messages, "model": settings.LLM_MODEL, "enabled": llm.OllamaClient().available()})
 
     def post(self, request, company_pk):
+        """?stream=1 — Server-Sent Events: status / tools / delta / done; иначе обычный JSON с готовым ответом."""
         company = get_company_for_user(request.user, company_pk)
         message = (request.data.get("message") or "").strip()
         if not message:
             return Response({"detail": "Пустое сообщение"}, status=400)
-        return Response(llm.answer(company, request.user, message, channel="web"))
+        if request.query_params.get("stream") != "1":
+            return Response(llm.answer(company, request.user, message, channel="web"))
+        user = request.user
+
+        def events():
+            for evt in llm.answer_stream(company, user, message, channel="web"):
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+
+        resp = StreamingHttpResponse(events(), content_type="text/event-stream; charset=utf-8")
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
 
     def delete(self, request, company_pk):
         company = get_company_for_user(request.user, company_pk)

@@ -109,12 +109,13 @@ async def notifier(_app: Application):
     interval = max(1, settings.TELEGRAM_NOTIFY_INTERVAL_MIN) * 60
     while True:
         try:
+            await run(services.warm_up_model)  # держим модель в памяти: первый вопрос не ждёт холодного старта
             sent = await run(services.send_pending_notifications)
             if sent:
                 log.info("telegram: sent %s notifications", sent)
         except Exception:  # noqa: BLE001
             log.exception("telegram notifier failed")
-        await asyncio.sleep(interval)
+        await asyncio.sleep(min(interval, 25 * 60))
 
 
 async def post_init(app: Application):

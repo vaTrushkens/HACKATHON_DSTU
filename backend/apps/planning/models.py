@@ -44,11 +44,12 @@ class PlannedEvent(models.Model):
         ("bank_payroll", "Зарплатный проект (банк)"),
         ("bank_order", "Платёжное поручение (не исполнено)"),
         ("tax", "Налог / взнос"),
+        ("ofd_acquiring", "Эквайринг к зачислению (ОФД)"),
     ]
     STATUSES = [("expected", "Ожидается"), ("matched", "Исполнено"), ("overdue", "Просрочено"), ("cancelled", "Отменено")]
 
     company = models.ForeignKey("companies.Company", on_delete=models.CASCADE, related_name="planned_events")
-    kind = models.CharField(max_length=16, choices=KINDS, default="manual")
+    kind = models.CharField(max_length=32, choices=KINDS, default="manual")
     direction = models.CharField(max_length=16)
     amount = models.DecimalField(max_digits=18, decimal_places=2)
     date = models.DateField("Ожидаемая дата")
@@ -107,6 +108,24 @@ class Contract(models.Model):
     @property
     def ref(self) -> str:
         return f"contract:{self.id}"
+
+
+class IntegrationConfig(models.Model):
+    """Ключи внешних API по компании (банк, DaData). Значения не отдаются наружу целиком."""
+
+    KINDS = [("bank", "API банка"), ("dadata", "DaData: ЕГРЮЛ / ЕГРИП")]
+
+    company = models.ForeignKey("companies.Company", on_delete=models.CASCADE, related_name="integration_configs")
+    kind = models.CharField(max_length=16, choices=KINDS)
+    config = models.JSONField(default=dict, blank=True)
+    enabled = models.BooleanField(default=True)
+    last_sync = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=16, blank=True)  # ok | error
+    last_error = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("company", "kind")
 
 
 class CounterpartyCheck(models.Model):

@@ -68,10 +68,12 @@ class RegistryAdapter:
 
 
 ADAPTERS = {
-    "bank": {"title": BankAdapter.title, "kind": "internal", "status": "mock", "description": "График кредитов и зарплатный проект восстанавливаются из выписки; при подключении API банка — прямые данные."},
-    "1c": {"title": "1С / ЭДО: выписки и счета", "kind": "external", "status": "file", "description": "Загрузка файлов 1CClientBankExchange через /upload/, счета — через /events/ (kind=invoice_*)."},
-    "registry": {"title": RegistryAdapter.title, "kind": "external", "status": "mock", "description": "Проверка ИНН контрагента; снижает вероятность оплаты для проблемных клиентов."},
-    "manual": {"title": "Ручной ввод предпринимателя", "kind": "manual", "status": "active", "description": "«Клиент обещал заплатить 300 000 ₽ 20-го», «в декабре куплю оборудование»."},
-    "contract": {"title": "Договоры с клиентами и поставщиками", "kind": "manual", "status": "active", "description": "Сумма, график (предоплата/этапы/рассрочка), отсрочка — превращаются в ожидаемые платежи с учётом типичной задержки клиента."},
-    "tax_calendar": {"title": "Налоговый календарь", "kind": "internal", "status": "active", "description": "ЕНП до 28-го, квартальные авансы УСН/НДС — рассчитываются по истории платежей."},
+    "bank": {"title": BankAdapter.title, "kind": "internal", "config": "bank", "actions": ["sync"], "description": "С ключом — кредиты, зарплатный проект и неисполненные платёжки из API банка по контракту из README; без ключа график кредитов и зарплата восстанавливаются из выписки."},
+    "1c": {"title": "1С: счета на оплату", "kind": "external", "actions": ["import_invoices"], "description": "Файл CommerceML (выгрузка документов из 1С) или таблица счетов CSV/XLSX. Выписку 1С:Клиент-банк загружайте на странице «Операции»."},
+    "edo": {"title": "ЭДО: УПД и счета-фактуры", "kind": "external", "actions": ["import_invoices"], "description": "XML в формате ФНС (Диадок, СБИС, Такском). Направление — по ИНН продавца и покупателя: наш ИНН у продавца → нам заплатят."},
+    "ofd": {"title": "Онлайн-касса / ОФД: выручка к зачислению", "kind": "external", "actions": ["import_ofd"], "description": "Отчёт по сменам или чекам (CSV/XLSX). Безналичная выручка попадает в прогноз как эквайринг следующего рабочего дня."},
+    "registry": {"title": RegistryAdapter.title, "kind": "external", "config": "dadata", "actions": ["sync"], "description": "С ключом DaData — ЕГРЮЛ/ЕГРИП: статус, ликвидация, банкротство; без ключа — заглушка с тем же контрактом. Проблемный статус снижает вероятность оплаты по счетам клиента."},
+    "manual": {"title": "Ручной ввод предпринимателя", "kind": "manual", "actions": [], "description": "«Клиент обещал заплатить 300 000 ₽ 20-го», «в декабре куплю оборудование»."},
+    "contract": {"title": "Договоры с клиентами и поставщиками", "kind": "manual", "actions": [], "description": "Сумма, график (предоплата/этапы/рассрочка), отсрочка — превращаются в ожидаемые платежи с учётом типичной задержки клиента."},
+    "tax_calendar": {"title": "Налоговый календарь", "kind": "internal", "actions": [], "description": "ЕНП до 28-го, квартальные авансы УСН/НДС — рассчитываются по истории платежей."},
 }

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { del, get, post } from '../api'
+import { API_URL, del, get, post, tokens } from '../api'
 import { useAuth } from '../auth'
 
-type Msg = { id?: number; role: 'user' | 'assistant'; content: string; tools_used?: { name: string }[]; source?: string }
+type Msg = { id?: number; role: 'user' | 'assistant'; content: string; tools_used?: { name: string }[]; source?: string; pending?: boolean }
 type TgStatus = { linked: boolean; username?: string; company?: string | null; bot_username?: string }
 type LinkCode = { code: string; deep_link: string | null; bot_username: string }
 
@@ -16,6 +16,7 @@ export default function ChatWidget() {
   const [msgs, setMsgs] = useState<Msg[]>([])
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState('')
   const [model, setModel] = useState<{ name: string; enabled: boolean } | null>(null)
   const [tg, setTg] = useState<TgStatus | null>(null)
   const [link, setLink] = useState<LinkCode | null>(null)
@@ -51,16 +52,40 @@ export default function ChatWidget() {
 
   if (!company) return null
 
+  const patchLast = (fn: (m: Msg) => Msg) => setMsgs((list) => list.map((m, i) => (i === list.length - 1 ? fn(m) : m)))
+
+  // Потоковый ответ (SSE): текст появляется по мере генерации; если поток недоступен — обычный запрос.
   const send = async (q: string) => {
     const message = q.trim()
     if (!message || busy) return
-    setText(''); setErr('')
-    setMsgs((m) => [...m, { role: 'user', content: message }])
+    setText(''); setErr(''); setStatus('Думаю…')
+    setMsgs((m) => [...m, { role: 'user', content: message }, { role: 'assistant', content: '', pending: true }])
     setBusy(true)
     try {
-      const r = await post(`/companies/${company.id}/assistant/chat/`, { message })
-      setMsgs((m) => [...m, { role: 'assistant', content: r.reply, tools_used: r.tools_used, source: r.source }])
-    } catch (e: any) { setErr(e?.response?.data?.detail || 'Ассистент не ответил') } finally { setBusy(false) }
+      const res = await fetch(`${API_URL}/companies/${company.id}/assistant/chat/?stream=1`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokens.access ?? ''}` }, body: JSON.stringify({ message }) })
+      if (!res.ok || !res.body) throw new Error(`stream ${res.status}`)
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        let idx
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const line = buf.slice(0, idx).split('\n').find((l) => l.startsWith('data: ')); buf = buf.slice(idx + 2)
+          if (!line) continue
+          const evt = JSON.parse(line.slice(6))
+          if (evt.type === 'status') setStatus(evt.text)
+          else if (evt.type === 'tools') patchLast((m) => ({ ...m, tools_used: evt.tools }))
+          else if (evt.type === 'delta') { setStatus(''); patchLast((m) => ({ ...m, content: evt.replace ? evt.text : m.content + evt.text })) }
+          else if (evt.type === 'done') patchLast(() => ({ role: 'assistant', content: evt.reply, tools_used: evt.tools_used, source: evt.source }))
+        }
+      }
+    } catch {
+      try {
+        const r = await post(`/companies/${company.id}/assistant/chat/`, { message })
+        patchLast(() => ({ role: 'assistant', content: r.reply, tools_used: r.tools_used, source: r.source }))
+      } catch (e: any) { setMsgs((m) => m.slice(0, -1)); setErr(e?.response?.data?.detail || 'Ассистент не ответил') }
+    } finally { setBusy(false); setStatus('') }
   }
   const clear = async () => { await del(`/companies/${company.id}/assistant/chat/`); setMsgs([]) }
   const connectTg = async () => {
@@ -101,8 +126,8 @@ export default function ChatWidget() {
           <div className="chat-messages" role="log" aria-live="polite">
             {msgs.length === 0 && !busy && <div className="chat-msg assistant">Спросите о прогнозе, платежах, налогах или о том, как пользоваться сервисом. Все цифры беру из тех же расчётов, что и на экране.</div>}
             {msgs.map((m, i) => (
-              <div key={m.id ?? `n${i}`} className={`chat-msg ${m.role}`}>
-                {m.content}
+              <div key={m.id ?? `n${i}`} className={`chat-msg ${m.role}${m.pending && !m.content ? ' chat-msg-empty' : ''}`}>
+                {m.content}{busy && i === msgs.length - 1 && m.role === 'assistant' && <span className="chat-cursor" aria-hidden="true" />}
                 {m.role === 'assistant' && ((m.tools_used?.length ?? 0) > 0 || m.source === 'rules') && (
                   <div className="chat-tools">
                     {m.tools_used?.map((t, j) => <span key={j}>{TOOL_LABELS[t.name] ?? t.name}</span>)}
@@ -111,7 +136,7 @@ export default function ChatWidget() {
                 )}
               </div>
             ))}
-            {busy && <div className="chat-typing">Считаю прогноз и формулирую ответ…</div>}
+            {busy && status && <div className="chat-typing">{status}</div>}
             {err && <div className="error small">{err}</div>}
             <div ref={bottom} />
           </div>

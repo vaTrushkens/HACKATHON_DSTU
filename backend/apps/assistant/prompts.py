@@ -45,7 +45,26 @@ def human_date(v) -> str:
     return f"{d.day} {MONTHS[d.month - 1]}"
 
 
-def system_prompt(company: Company, site_help: bool = True) -> str:
+def tools_section() -> str:
+    """Список инструментов и правила выбора — часть единого системного промпта."""
+    lines = ["Данные сервиса (инструменты), которые можно запросить перед ответом:"]
+    for t in tools.TOOLS:
+        props = t.parameters.get("properties", {})
+        params = ", ".join(f"{k} ({v.get('type')}{': ' + v['description'] if v.get('description') else ''})" for k, v in props.items())
+        lines.append(f"- {t.name}: {t.description} Параметры: {params or 'нет'}.")
+    lines += [
+        "- none: вопрос о том, как пользоваться сайтом или его разделами, приветствие, благодарность — данные не нужны.",
+        "- offtopic: вопрос не о финансах компании и не о сервисе — задачки и головоломки («сколько букв н в слове банан», «2+2»), общие знания и факты, погода, новости, развлечения и анекдоты, код и программирование («напиши функцию»), переводы, рецепты, личные советы, другие темы. Такие вопросы запрещены — выбирай offtopic, даже если они вежливые.",
+        "Правила выбора: не задавай уточнений — если параметр не назван, не указывай его (сработает значение по умолчанию). «Когда разрыв / сколько не хватит / какой остаток / риск» → get_forecast_summary. «Что заплатить / какие платежи / поступления» → get_upcoming_payments. «Что если / задержит / упадёт / вырастет / внеплановый» → run_what_if. «На что уходит / структура / статьи расходов» → get_category_breakdown. «Налоги / ЕНП / УСН» → get_tax_calendar. «Добавь / запиши / клиент обещал» с суммой и датой → add_planned_event.",
+    ]
+    return "\n".join(lines)
+
+
+ROUTE_INSTRUCTION = "\n\n[Служебный шаг: выбери, какие данные нужны для ответа на этот вопрос. Верни только JSON {\"tool\": имя инструмента, \"none\" или \"offtopic\", \"args\": {...}}.]"
+
+
+def system_prompt(company: Company) -> str:
+    """Единый промпт для всех шагов диалога: одинаковый префикс позволяет Ollama переиспользовать KV-кэш между запросами."""
     ctx = tools.build_context(company)
     f, c = ctx["forecast"], ctx["company"]
     gap = f" около {human_date(f['gap_date'])}, не хватит примерно {money(f['deficit_p50'])}" if f["gap_date"] else ""
@@ -56,26 +75,12 @@ def system_prompt(company: Company, site_help: bool = True) -> str:
             f"Компания: {c['name']} ({c['legal_form'] or '—'}, {c['industry'] or '—'}); налоговый режим: {c['tax_regime'] or 'не определён'}. Дата «сегодня» в сервисе: {human_date(f['as_of'])}.",
             f"Текущая оценка: остаток {money(f['opening_balance'])}; через {f['horizon_days']} дней ожидается {money(f['end_balance_p50'])}; риск кассового разрыва {LEVELS.get(f['risk_level'], f['risk_level'])} (вероятность {f['probability']:.0%}){gap}. {f['summary']}",
             f"Ближайшие 7 дней: {upcoming}.",
-            *([SITE_HELP] if site_help else []),
+            SITE_HELP,
+            tools_section(),
         ]
     )
 
 
-def router_prompt() -> str:
-    """Промпт шага выбора инструмента (режим router): только список инструментов и правила выбора."""
-    lines = ["Ты выбираешь, какие данные сервиса прогноза денежного потока нужны, чтобы ответить на вопрос владельца бизнеса. Верни JSON {\"tool\": имя, \"args\": {...}}.", "Инструменты:"]
-    for t in tools.TOOLS:
-        props = t.parameters.get("properties", {})
-        params = ", ".join(f"{k} ({v.get('type')}{': ' + v['description'] if v.get('description') else ''})" for k, v in props.items())
-        lines.append(f"- {t.name}: {t.description} Параметры: {params or 'нет'}.")
-    lines += [
-        "- none: вопрос о том, как пользоваться сайтом или его разделами, приветствие, благодарность — данные не нужны.",
-        "- offtopic: вопрос не о финансах компании и не о сервисе — задачки и головоломки («сколько букв н в слове банан», «2+2»), общие знания и факты, погода, новости, развлечения и анекдоты, код и программирование («напиши функцию»), переводы, рецепты, личные советы, другие темы. Такие вопросы запрещены — выбирай offtopic, даже если они вежливые.",
-        "Правила: не задавай уточнений — если параметр не назван, не указывай его (сработает значение по умолчанию). Вопросы «когда разрыв / сколько не хватит / какой остаток / риск» → get_forecast_summary. «Что заплатить / какие платежи / поступления» → get_upcoming_payments. «Что если / задержит / упадёт / вырастет / внеплановый» → run_what_if. «На что уходит / структура / статьи расходов» → get_category_breakdown. «Налоги / ЕНП / УСН» → get_tax_calendar. «Добавь / запиши / клиент обещал» с суммой и датой → add_planned_event.",
-    ]
-    return "\n".join(lines)
-
-
 def minimal_prompt(company: Company) -> str:
     """Когда прогноз построить нельзя (нет операций) — промпт без цифр, но с описанием сайта."""
-    return "\n".join([*BASE_RULES, f"Компания: {company.name}. Данных для прогноза пока нет — предложи загрузить выписку на странице «Операции».", SITE_HELP])
+    return "\n".join([*BASE_RULES, f"Компания: {company.name}. Данных для прогноза пока нет — предложи загрузить выписку на странице «Операции».", SITE_HELP, tools_section()])

@@ -17,7 +17,7 @@ def user_company(db, monkeypatch):
     user = User.objects.create_user("owner", password="pass12345")
     company = Company.objects.create(code="T1", name="Тест", legal_form="ООО")
     CompanyMembership.objects.create(user=user, company=company)
-    monkeypatch.setattr(llm, "system_prompt", lambda c, site_help=True: "system")
+    monkeypatch.setattr(llm, "system_prompt", lambda c: "system")
     return user, company
 
 
@@ -32,7 +32,8 @@ def test_router_offtopic_is_refused_without_model_answer(user_company, monkeypat
     user, company = user_company
     monkeypatch.setattr(settings, "LLM_MODE", "router")
     calls = []
-    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None: calls.append(fmt is not None) or {"role": "assistant", "content": '{"tool": "offtopic", "args": {}}'})
+    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None, num_predict=None: calls.append(fmt is not None) or {"role": "assistant", "content": '{"tool": "offtopic", "args": {}}'})
+    monkeypatch.setattr(llm.OllamaClient, "chat_stream", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("ответ модели не нужен")))
     out = llm.answer(company, user, "Сколько букв н в слове банан?")
     assert out["reply"] == llm.OFFTOPIC_REPLY and out["tools_used"] == [] and calls == [True]  # только шаг маршрутизации
 
@@ -55,35 +56,62 @@ def test_router_never_creates_event_from_how_to_question(user_company, monkeypat
     created = []
     monkeypatch.setattr(tools.TOOLS_BY_NAME["add_planned_event"], "func", lambda company, **kw: created.append(kw) or {"id": 1})
     route = '{"tool": "add_planned_event", "args": {"direction": "income", "amount": 300000, "date": "2024-08-15", "label": "Счёт"}}'
-    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None: {"role": "assistant", "content": route if fmt else "Откройте «Календарь платежей»."})
+    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None, num_predict=None: {"role": "assistant", "content": route})
+    monkeypatch.setattr(llm.OllamaClient, "chat_stream", _stream_from("Откройте «Календарь платежей»."))
     out = llm.answer(company, user, "Как добавить счёт от клиента в календарь?")  # чисел в вопросе нет → выдуманная сумма отбрасывается → событие не создаётся
     assert created == [] and out["tools_used"] == []
 
 
-def test_router_picks_tool_and_answers_from_its_data(user_company, monkeypatch):
+def _stream_from(text):
+    def chat_stream(self, messages, think=None):
+        chat_stream.seen.append(messages[-1]["content"])
+        yield from (text[i : i + 7] for i in range(0, len(text), 7))
+
+    chat_stream.seen = []
+    return chat_stream
+
+
+def test_router_llm_route_and_streamed_answer_from_tool_data(user_company, monkeypatch):
     user, company = user_company
     monkeypatch.setattr(settings, "LLM_MODE", "router")
-    seen = []
 
-    def fake_chat(self, messages, specs, fmt=None, think=None):
-        if fmt:  # шаг выбора инструмента: структурированный JSON
-            assert think is False and "get_category_breakdown" in messages[0]["content"]
-            return {"role": "assistant", "content": '{"tool": "get_category_breakdown", "args": {"months": "6"}}'}
-        seen.append(messages[-1]["content"])
-        return {"role": "assistant", "content": "Больше всего — зарплата, 1 500 000 ₽ в месяц."}
+    def fake_chat(self, messages, specs, fmt=None, think=None, num_predict=None):
+        assert fmt and think is False and "Служебный шаг" in messages[-1]["content"]  # шаг выбора инструмента: JSON по схеме
+        return {"role": "assistant", "content": '{"tool": "get_category_breakdown", "args": {"months": "6"}}'}
 
+    stream = _stream_from("Больше всего — **зарплата**, 1 500 000 ₽ в месяц.")
     monkeypatch.setattr(llm.OllamaClient, "chat", fake_chat)
+    monkeypatch.setattr(llm.OllamaClient, "chat_stream", stream)
     monkeypatch.setattr(tools.TOOLS_BY_NAME["get_category_breakdown"], "func", lambda company, months=3: {"outflow": [{"label": "Зарплата", "monthly_avg": 1500000}], "months": months})
-    out = llm.answer(company, user, "На что уходит больше всего?")
-    assert out["tools_used"] == [{"name": "get_category_breakdown", "args": {"months": "6"}}]
-    assert "Зарплата" in seen[0] and '"months": 6' in seen[0]  # данные инструмента попали в финальный запрос, аргумент приведён к int
-    assert out["reply"].startswith("Больше всего")
+    events = list(llm.answer_stream(company, user, "Расскажи про мои траты"))  # формулировка не ловится быстрым маршрутизатором → решает модель
+    assert [e["type"] for e in events][:4] == ["status", "status", "tools", "status"] and events[-1]["type"] == "done"
+    assert events[-1]["tools_used"] == [{"name": "get_category_breakdown", "args": {"months": "6"}}]
+    assert "Зарплата" in stream.seen[0] and '"months": 6' in stream.seen[0]  # данные инструмента попали в финальный запрос, аргумент приведён к int
+    assert events[-1]["reply"] == "Больше всего — зарплата, 1 500 000 ₽ в месяц." and "**" not in "".join(e["text"] for e in events if e["type"] == "delta")
+    assert ChatMessage.objects.filter(user=user, company=company, role="assistant").get().content == events[-1]["reply"]
+
+
+def test_quick_route_skips_model_for_common_questions(user_company, monkeypatch):
+    user, company = user_company
+    monkeypatch.setattr(settings, "LLM_MODE", "router")
+    assert llm.quick_route("Когда возможен кассовый разрыв?") == "get_forecast_summary"
+    assert llm.quick_route("Какие платежи на этой неделе?") == "get_upcoming_payments"
+    assert llm.quick_route("Какие налоги предстоят?") == "get_tax_calendar"
+    assert llm.quick_route("На что уходит больше всего денег в месяц?") == "get_category_breakdown"
+    assert llm.quick_route("Что если клиент задержит оплату на 14 дней?") is None  # сценарию нужны аргументы — решает модель
+    assert llm.quick_route("Как добавить счёт?") is None and llm.quick_route("Сколько букв н в слове банан?") is None
+    monkeypatch.setattr(llm.OllamaClient, "chat", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("шаг выбора не должен вызываться")))
+    monkeypatch.setattr(llm.OllamaClient, "chat_stream", _stream_from("Разрыв 10 августа."))
+    monkeypatch.setattr(tools.TOOLS_BY_NAME["get_forecast_summary"], "func", lambda company, horizon=60: {"gap_date": "2026-08-10", "horizon": horizon})
+    out = llm.answer(company, user, "Когда возможен кассовый разрыв на 30 дней?")
+    assert out["tools_used"] == [{"name": "get_forecast_summary", "args": {}}] and out["reply"] == "Разрыв 10 августа."  # число в вопросе есть, но аргумент не извлекаем — умолчание как на экране
 
 
 def test_router_none_answers_without_tools(user_company, monkeypatch):
     user, company = user_company
     monkeypatch.setattr(settings, "LLM_MODE", "router")
-    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None: {"role": "assistant", "content": '{"tool": "none", "args": {}}' if fmt else "Откройте «Календарь платежей»."})
+    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None, num_predict=None: {"role": "assistant", "content": '{"tool": "none", "args": {}}'})
+    monkeypatch.setattr(llm.OllamaClient, "chat_stream", _stream_from("Откройте «Календарь платежей»."))
     out = llm.answer(company, user, "Как добавить счёт?")
     assert out["tools_used"] == [] and out["reply"] == "Откройте «Календарь платежей»."
 
@@ -96,7 +124,7 @@ def test_native_tool_loop_coerces_args_and_saves_history(user_company, monkeypat
         {"role": "assistant", "content": "Разрыв 28 июля, не хватит 120 000 ₽."},
     ]
     seen = []
-    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None: replies.pop(0))
+    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None, num_predict=None: replies.pop(0))
     monkeypatch.setattr(tools.TOOLS_BY_NAME["get_forecast_summary"], "func", lambda company, horizon=60: seen.append(horizon) or {"summary": "ok"})
     out = llm.answer(company, user, "Когда разрыв?")
     assert out["source"] == "llm"
@@ -109,12 +137,13 @@ def test_native_tool_loop_coerces_args_and_saves_history(user_company, monkeypat
 def test_falls_back_to_rules_when_llm_down(user_company, monkeypatch):
     user, company = user_company
 
-    def boom(self, messages, specs, fmt=None, think=None):
+    def boom(self, messages, specs=None, fmt=None, think=None, num_predict=None):
         raise llm.LLMUnavailable("down")
 
     monkeypatch.setattr(llm.OllamaClient, "chat", boom)
+    monkeypatch.setattr(llm.OllamaClient, "chat_stream", boom)
     monkeypatch.setattr(llm, "fallback_reply", lambda c: "ответ по правилам")
-    out = llm.answer(company, user, "?")
+    out = llm.answer(company, user, "Когда разрыв?")
     assert out == {"reply": "ответ по правилам", "tools_used": [], "source": "rules", "model": out["model"]}
 
 

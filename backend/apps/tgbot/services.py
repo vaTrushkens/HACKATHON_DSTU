@@ -136,6 +136,10 @@ def payments_text(company_id: int, days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def warm_up_model() -> bool:
+    return llm.OllamaClient().warm_up()
+
+
 def assistant_reply(chat_id: int, text: str) -> str:
     link = TelegramLink.objects.select_related("user", "company").filter(chat_id=chat_id).first()
     if not link or not link.company:
