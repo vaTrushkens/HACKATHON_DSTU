@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+*.sqlite3
+backend/models_store/*.joblib
+backend/staticfiles/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+.vscode/
+.idea/
