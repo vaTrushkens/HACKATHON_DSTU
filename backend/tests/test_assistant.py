@@ -28,6 +28,27 @@ def test_coerce_maps_direction_synonyms_and_drops_unknown():
     assert "direction" not in tools._coerce(schema, {"direction": "sideways"})
 
 
+def test_router_offtopic_is_refused_without_model_answer(user_company, monkeypatch):
+    user, company = user_company
+    monkeypatch.setattr(settings, "LLM_MODE", "router")
+    calls = []
+    monkeypatch.setattr(llm.OllamaClient, "chat", lambda self, messages, specs, fmt=None, think=None: calls.append(fmt is not None) or {"role": "assistant", "content": '{"tool": "offtopic", "args": {}}'})
+    out = llm.answer(company, user, "Сколько букв н в слове банан?")
+    assert out["reply"] == llm.OFFTOPIC_REPLY and out["tools_used"] == [] and calls == [True]  # только шаг маршрутизации
+
+
+def test_collect_notifications_respects_kinds(user_company, monkeypatch):
+    _, company = user_company
+    fake = {"risk": {"alerts": [{"kind": "cash_gap", "level": "high", "title": "Разрыв", "message": "m", "date": "2026-07-28", "amount": 1}, {"kind": "big_payment", "level": "info", "title": "Крупный", "message": "m", "date": "2026-07-10", "amount": 2}]},
+            "forecast": {"as_of": "2026-07-01", "events": [{"direction": "Списание", "date": "2026-07-02", "amount": 100, "label": "Аренда", "source": "recurring"}]}}
+    monkeypatch.setattr(tg.assistant_tools, "forecast_data", lambda c: fake)
+    kinds = lambda items: [k.split(":")[0] + ":" + k.split(":")[2] if k.startswith("alert") else k.split(":")[0] for k, _ in items]  # noqa: E731
+    assert kinds(tg.collect_notifications(company)) == ["alert:cash_gap", "alert:big_payment", "remind"]
+    assert kinds(tg.collect_notifications(company, ["cash_gap"])) == ["alert:cash_gap"]
+    assert kinds(tg.collect_notifications(company, ["reminders"])) == ["remind"]
+    assert tg.collect_notifications(company, []) == []
+
+
 def test_router_never_creates_event_from_how_to_question(user_company, monkeypatch):
     user, company = user_company
     monkeypatch.setattr(settings, "LLM_MODE", "router")
@@ -108,7 +129,9 @@ def test_link_code_flow(user_company):
     info = tg.consume_link_code(rec.code.lower(), 42, "oleg")
     assert info == {"user": "owner", "company": "Тест", "company_id": company.id}
     link = TelegramLink.objects.get(chat_id=42)
-    assert link.company == company and list(link.notify_companies.all()) == [company]
+    assert link.company == company and link.notify_kinds == ["cash_gap", "low_runway", "overdue_income", "big_payment", "reminders"]
+    assert tg.toggle_notify(42, "reminders") is False and tg.toggle_notify(42, "nope") is None
+    assert [o["on"] for o in tg.notify_options(42)] == [True, True, True, True, False]
     assert tg.consume_link_code(rec.code, 42, "oleg") is None  # одноразовый
     assert tg.link_status(user)["linked"] is True
     assert tg.unlink(user) == 1
@@ -116,9 +139,8 @@ def test_link_code_flow(user_company):
 
 def test_notifications_are_deduplicated(user_company, monkeypatch):
     user, company = user_company
-    link = TelegramLink.objects.create(user=user, chat_id=1, company=company)
-    link.notify_companies.add(company)
-    monkeypatch.setattr(tg, "collect_notifications", lambda c: [("alert:T1:cash_gap:2026-07-28:120000", "Разрыв")])
+    TelegramLink.objects.create(user=user, chat_id=1, company=company)
+    monkeypatch.setattr(tg, "collect_notifications", lambda c, kinds: [("alert:T1:cash_gap:2026-07-28:120000", "Разрыв")])
     sent = []
     monkeypatch.setattr(tg, "send_message", lambda chat_id, text: sent.append((chat_id, text)))
     assert tg.send_pending_notifications() == 1

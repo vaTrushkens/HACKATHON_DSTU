@@ -14,13 +14,12 @@ from . import services
 
 log = logging.getLogger(__name__)
 HELP = (
-    "Я — ассистент сервиса прогноза денежного потока.\n\n"
+    "Я — ассистент сервиса прогноза денежного потока. Чат привязан к компании, выбранной на сайте при подключении; чтобы сменить её, отключите Telegram на сайте и подключите заново.\n\n"
     "/forecast — остаток, риск кассового разрыва, рекомендации\n"
     "/payments [дней] — ближайшие платежи и поступления\n"
-    "/company — выбрать компанию для вопросов\n"
-    "/notify — по каким компаниям присылать уведомления\n"
+    "/notify — о каких ситуациях присылать уведомления\n"
     "/help — эта справка\n\n"
-    "Или просто напишите вопрос: «когда разрыв?», «что заплатить на неделе?», «что если клиент задержит оплату на 2 недели?», «как работает страница План-факт?»."
+    "Или просто напишите вопрос о финансах компании: «когда разрыв?», «что заплатить на неделе?», «что если клиент задержит оплату на 2 недели?», «как работает страница План-факт?»."
 )
 
 
@@ -75,40 +74,27 @@ async def cmd_payments(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(await run(services.payments_text, info["company_id"], max(1, min(days, 90))))
 
 
-def _keyboard(companies: list[dict], kind: str) -> InlineKeyboardMarkup:
-    rows = []
-    for c in companies:
-        mark = ("✅ " if c["notify"] else "☐ ") if kind == "notify" else ("● " if c["selected"] else "○ ")
-        rows.append([InlineKeyboardButton(mark + c["label"], callback_data=f"{kind}:{c['id']}")])
-    return InlineKeyboardMarkup(rows)
-
-
-async def cmd_company(update: Update, _ctx):
-    if await _linked(update):
-        companies = await run(services.user_companies, update.effective_chat.id)
-        await update.message.reply_text("Компания для вопросов в чате:", reply_markup=_keyboard(companies, "company"))
+def _notify_keyboard(options: list[dict]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(("✅ " if o["on"] else "☐ ") + o["label"], callback_data=f"notify:{o['code']}")] for o in options])
 
 
 async def cmd_notify(update: Update, _ctx):
-    if await _linked(update):
-        companies = await run(services.user_companies, update.effective_chat.id)
-        await update.message.reply_text("Уведомления о рисках и платежах — отметьте компании:", reply_markup=_keyboard(companies, "notify"))
+    info = await _linked(update)
+    if info:
+        options = await run(services.notify_options, update.effective_chat.id)
+        await update.message.reply_text(f"Уведомления по компании «{info['company']}» — отметьте ситуации, о которых сообщать:", reply_markup=_notify_keyboard(options))
 
 
 async def on_callback(update: Update, _ctx):
     q = update.callback_query
-    kind, _, raw = q.data.partition(":")
+    kind, _, code = q.data.partition(":")
     chat_id = q.message.chat.id
-    if kind == "company":
-        name = await run(services.set_company, chat_id, int(raw))
-        await q.answer(f"Выбрано: {name}" if name else "Нет доступа")
-        companies = await run(services.user_companies, chat_id)
-        await q.edit_message_reply_markup(_keyboard(companies, "company"))
-    elif kind == "notify":
-        state = await run(services.toggle_notify, chat_id, int(raw))
-        await q.answer("Уведомления включены" if state else "Уведомления выключены" if state is False else "Нет доступа")
-        companies = await run(services.user_companies, chat_id)
-        await q.edit_message_reply_markup(_keyboard(companies, "notify"))
+    if kind == "notify":
+        state = await run(services.toggle_notify, chat_id, code)
+        await q.answer("Включено" if state else "Выключено" if state is False else "Недоступно")
+        await q.edit_message_reply_markup(_notify_keyboard(await run(services.notify_options, chat_id)))
+    else:
+        await q.answer("Эта кнопка больше не поддерживается")
 
 
 async def on_text(update: Update, _ctx):
@@ -132,7 +118,7 @@ async def notifier(_app: Application):
 
 
 async def post_init(app: Application):
-    await app.bot.set_my_commands([("forecast", "Прогноз и риск разрыва"), ("payments", "Ближайшие платежи"), ("company", "Выбрать компанию"), ("notify", "Настроить уведомления"), ("help", "Справка")])
+    await app.bot.set_my_commands([("forecast", "Прогноз и риск разрыва"), ("payments", "Ближайшие платежи"), ("notify", "О чём присылать уведомления"), ("help", "Справка")])
     app.bot_data["notifier"] = asyncio.create_task(notifier(app))  # ссылка в bot_data, чтобы задачу не собрал GC
 
 
@@ -142,7 +128,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("forecast", cmd_forecast))
     app.add_handler(CommandHandler("payments", cmd_payments))
-    app.add_handler(CommandHandler("company", cmd_company))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

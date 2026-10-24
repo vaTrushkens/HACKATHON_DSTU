@@ -118,9 +118,13 @@ def _native(client: OllamaClient, company: Company, messages: list[dict], used: 
 
 ROUTE_SCHEMA = {
     "type": "object",
-    "properties": {"tool": {"type": "string", "enum": [*tools.TOOLS_BY_NAME, "none"]}, "args": {"type": "object"}},
+    "properties": {"tool": {"type": "string", "enum": [*tools.TOOLS_BY_NAME, "none", "offtopic"]}, "args": {"type": "object"}},
     "required": ["tool", "args"],
 }
+OFFTOPIC_REPLY = (
+    "Я отвечаю только на вопросы о финансах компании и о работе сервиса: остаток и прогноз, кассовый разрыв, платежи и поступления, налоги, сценарии «что если», разделы сайта. "
+    "Спросите, например: «Когда возможен кассовый разрыв?» или «Какие платежи на этой неделе?»"
+)
 
 
 def _router(client: OllamaClient, company: Company, messages: list[dict], used: list[dict]) -> str:
@@ -132,6 +136,8 @@ def _router(client: OllamaClient, company: Company, messages: list[dict], used: 
     except ValueError:
         route = {}
     name, args = route.get("tool") or "none", route.get("args") or {}
+    if name == "offtopic":
+        return OFFTOPIC_REPLY  # фиксированный отказ без обращения к модели: быстро и без «а может всё-таки»
     args = {k: v for k, v in args.items() if v is not None} if isinstance(args, dict) else {}
     tool = tools.TOOLS_BY_NAME.get(name)
     if not re.search(r"\d", question):
