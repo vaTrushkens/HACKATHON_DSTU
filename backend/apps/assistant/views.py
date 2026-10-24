@@ -4,35 +4,46 @@ from rest_framework.views import APIView
 
 from core.permissions import get_company_for_user
 
-from . import tools
+from . import llm, tools
+from .models import ChatMessage
 
 
 class AssistantContextView(APIView):
-    """Структурированный контекст компании и список инструментов — то, что получит LLM."""
+    """Структурированный контекст компании и список инструментов — то, что получает модель."""
 
     def get(self, request, company_pk):
         company = get_company_for_user(request.user, company_pk)
-        return Response({"llm_provider": settings.LLM_PROVIDER, "enabled": settings.LLM_PROVIDER != "none", "context": tools.build_context(company)})
+        return Response({"llm_provider": settings.LLM_PROVIDER, "model": settings.LLM_MODEL, "enabled": llm.OllamaClient().available(), "context": tools.build_context(company)})
 
 
 class AssistantToolView(APIView):
-    """Прямой вызов инструмента (для отладки и для будущего оркестратора): POST {"tool": name, "args": {...}}."""
+    """Прямой вызов инструмента (для отладки): POST {"tool": name, "args": {...}}."""
 
     def post(self, request, company_pk):
         company = get_company_for_user(request.user, company_pk)
-        tool = tools.TOOLS_BY_NAME.get(request.data.get("tool"))
-        if not tool:
+        name = request.data.get("tool", "")
+        if name not in tools.TOOLS_BY_NAME:
             return Response({"detail": "Неизвестный инструмент", "available": list(tools.TOOLS_BY_NAME)}, status=400)
-        return Response({"tool": tool.name, "result": tool.func(company, **(request.data.get("args") or {}))})
+        return Response({"tool": name, "result": tools.call(company, name, request.data.get("args") or {})})
 
 
 class AssistantChatView(APIView):
-    """Заглушка чата: пока LLM не подключён, отвечает шаблонной сводкой из тех же инструментов."""
+    """GET — история и статус модели, POST {"message"} — ответ ассистента, DELETE — очистить историю."""
+
+    def get(self, request, company_pk):
+        company = get_company_for_user(request.user, company_pk)
+        rows = ChatMessage.objects.filter(user=request.user, company=company, channel="web").order_by("-id")[:40]
+        messages = [{"id": m.id, "role": m.role, "content": m.content, "tools_used": m.tools_used, "source": m.source, "created_at": m.created_at.isoformat()} for m in reversed(list(rows))]
+        return Response({"messages": messages, "model": settings.LLM_MODEL, "enabled": llm.OllamaClient().available()})
 
     def post(self, request, company_pk):
         company = get_company_for_user(request.user, company_pk)
-        summary = tools.get_forecast_summary(company)
-        text = summary["summary"] + ". " + summary["explanation"]
-        if summary["recommendations"]:
-            text += " Что можно сделать: " + "; ".join(r["title"] for r in summary["recommendations"][:3]) + "."
-        return Response({"reply": text, "llm": settings.LLM_PROVIDER, "note": "Ответ сформирован правилами; LLM-провайдер не подключён (LLM_PROVIDER=none)."})
+        message = (request.data.get("message") or "").strip()
+        if not message:
+            return Response({"detail": "Пустое сообщение"}, status=400)
+        return Response(llm.answer(company, request.user, message, channel="web"))
+
+    def delete(self, request, company_pk):
+        company = get_company_for_user(request.user, company_pk)
+        deleted, _ = ChatMessage.objects.filter(user=request.user, company=company, channel="web").delete()
+        return Response({"deleted": deleted})

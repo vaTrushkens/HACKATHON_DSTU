@@ -17,6 +17,8 @@ _PATTERNS = [
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
     (re.compile(r"(['\"]?(payment_purpose|counterparty_name|counterparty_inn|amount|balance_eod)['\"]?\s*[:=]\s*)('[^']*'|\"[^\"]*\"|[\d.,-]+)"), r"\1<скрыто>"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._-]+"), r"\1<token>"),
+    (re.compile(r"/bot\d+:[A-Za-z0-9_-]+"), "/bot<token>"),
+    (re.compile(r"\b\d{9,10}:[A-Za-z0-9_-]{30,}\b"), "<tg-token>"),
 ]
 
 

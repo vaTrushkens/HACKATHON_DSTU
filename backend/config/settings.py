@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "apps.planning",
     "apps.forecasting",
     "apps.assistant",
+    "apps.tgbot",
 ]
 
 MIDDLEWARE = [
@@ -105,10 +106,19 @@ FORECAST_DEFAULT_HORIZON = int(os.getenv("FORECAST_DEFAULT_HORIZON", "60"))
 FORECAST_N_PATHS = int(os.getenv("FORECAST_N_PATHS", "1000"))
 DATASET_DIR = os.getenv("DATASET_DIR", str(PROJECT_DIR.parent / "cashflow_dataset_participants"))
 
-# ---- LLM-ассистент (задел; сам чат-бот будет подключён позже) ----
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none")  # none | anthropic | openai | local
-LLM_MODEL = os.getenv("LLM_MODEL", "")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# ---- LLM-ассистент: локальная модель через Ollama (чат на сайте и Telegram-бот) ----
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemma4:e4b")
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))  # CPU-инференс: ответ с инструментами может занять десятки секунд
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "8192"))
+LLM_MODE = os.getenv("LLM_MODE", "router")  # router — выбор инструмента структурированным JSON (быстро, для компактных моделей); native — нативный function calling (модели от ~8B)
+LLM_THINK = os.getenv("LLM_THINK", "1") == "1"  # размышления в режиме native: надёжнее вызывает инструменты, но ~2× дольше
+
+# ---- Telegram-бот: уведомления о рисках/платежах и ответы ассистента ----
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_NOTIFY_INTERVAL_MIN = int(os.getenv("TELEGRAM_NOTIFY_INTERVAL_MIN", "30"))
+TELEGRAM_REMIND_DAYS = int(os.getenv("TELEGRAM_REMIND_DAYS", "3"))
 
 # ---- логирование: чувствительные данные (ИНН, суммы, контрагенты, назначения) маскируются ----
 LOGGING = {
@@ -118,5 +128,5 @@ LOGGING = {
     "formatters": {"std": {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"}},
     "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "std", "filters": ["mask_sensitive"]}},
     "root": {"handlers": ["console"], "level": os.getenv("LOG_LEVEL", "INFO")},
-    "loggers": {"django.db.backends": {"level": "WARNING"}},  # SQL с данными операций в логи не пишем
+    "loggers": {"django.db.backends": {"level": "WARNING"}, "httpx": {"level": "WARNING"}},  # SQL с данными операций и URL Telegram API с токеном в логи не пишем
 }

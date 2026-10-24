@@ -21,6 +21,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@db:5432/${POSTGRES_DB:-cashflow}
       DATASET_DIR: /data
+      LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://ollama:11434}
     volumes:
       - ./backend:/app
       - ./backend/models_store:/app/models_store
@@ -31,6 +32,44 @@ services:
       db:
         condition: service_healthy
     command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+
+  # Telegram-бот и рассылка уведомлений: тот же образ, отдельный процесс (long polling)
+  telegram:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@db:5432/${POSTGRES_DB:-cashflow}
+      LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://ollama:11434}
+    volumes:
+      - ./backend:/app
+      - ./backend/models_store:/app/models_store
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    restart: on-failure
+    command: python manage.py run_telegram_bot
+
+  # Локальная модель ассистента. Порт наружу не публикуется, чтобы не конфликтовать с Ollama на хосте.
+  # dns: публичные резолверы, иначе VPN с fake-ip DNS (198.18.x.x) ломает скачивание моделей
+  ollama:
+    image: ollama/ollama:latest
+    dns: ["1.1.1.1", "8.8.8.8"]
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m
+    volumes:
+      - ollama:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    dns: ["1.1.1.1", "8.8.8.8"]
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["sh", "-c", "sleep 3 && ollama pull ${LLM_MODEL:-gemma4:e4b}"]
+    restart: "no"
 
   frontend:
     build: ./frontend
@@ -46,3 +85,4 @@ services:
 
 volumes:
   pgdata:
+  ollama:

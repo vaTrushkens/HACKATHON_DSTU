@@ -16,4 +16,5 @@ urlpatterns = [
     path("api/", include("apps.planning.urls")),
     path("api/", include("apps.forecasting.urls")),
     path("api/", include("apps.assistant.urls")),
+    path("api/", include("apps.tgbot.urls")),
 ]
