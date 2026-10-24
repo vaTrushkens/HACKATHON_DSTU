@@ -1,3 +1,4 @@
+import Select from '../components/Select'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { get, patch } from '../api'
@@ -64,7 +65,7 @@ export default function Dashboard() {
           <label className="field">Дата «сегодня»<input type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} /></label>
           <label className="field">Неснижаемый остаток<input type="number" step="10000" value={minBalance} onChange={(e) => setMinBalance(e.target.value)} style={{ width: 150 }} /></label>
           <label className="field">Горизонт
-            <select value={horizon} onChange={(e) => setHorizon(Number(e.target.value))}><option value={30}>30 дней</option><option value={60}>60 дней</option><option value={90}>90 дней</option></select>
+            <Select value={horizon} onValueChange={(value) => setHorizon(Number(value))}><option value={30}>30 дней</option><option value={60}>60 дней</option><option value={90}>90 дней</option></Select>
           </label>
           <button className="secondary" onClick={saveSettings} disabled={loading}>Применить</button>
         </div>
@@ -93,7 +94,7 @@ export default function Dashboard() {
                 <span className={`badge ${fc.data_quality.level === 'ok' ? 'good' : fc.data_quality.level === 'medium' ? 'medium' : 'high'}`}>данные: {fc.data_quality.level === 'ok' ? 'достаточно' : fc.data_quality.level === 'medium' ? 'меньше года' : 'мало'}</span>
               </div>
             </div>
-            <BalanceChart daily={fc.daily} events={fc.events} history={history} actual={showActual ? actual : []} minBalance={fc.min_balance} />
+            <BalanceChart daily={fc.daily} events={fc.events} history={history} actual={showActual ? actual : undefined} minBalance={fc.min_balance} />
           </div>
 
           <div className="grid grid-2">

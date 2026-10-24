@@ -1,3 +1,5 @@
+import RangeField from '../components/RangeField'
+import Select from '../components/Select'
 import { useEffect, useState } from 'react'
 import { del, get, patch, post } from '../api'
 import { useAuth } from '../auth'
@@ -95,7 +97,7 @@ export default function Calendar() {
       )}
 
       {tab === 'events' && (
-        <div className="grid grid-2" style={{ gridTemplateColumns: '2fr 1fr' }}>
+        <div className="grid calendar-layout">
           <div className="card">
             <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}><h2>Ожидаемые события</h2><button className="secondary" onClick={refreshStatuses}>Сверить с фактом</button></div>
             <table>
@@ -120,14 +122,14 @@ export default function Calendar() {
             <h2>Добавить событие</h2>
             <p className="small muted">Например: «клиент обещал заплатить 300 000 ₽ 20-го» или «в декабре куплю оборудование за 1 млн».</p>
             <div className="grid" style={{ gap: 10 }}>
-              <label className="field">Тип<select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}><option value="manual">Ручной ввод</option><option value="invoice_in">Выставленный счёт клиенту</option><option value="invoice_out">Счёт от поставщика</option><option value="contract">Платёж по договору</option></select></label>
-              <label className="field">Направление<select value={form.direction} onChange={(e) => { const d = e.target.value; setForm({ ...form, direction: d, category: d === 'Поступление' ? 'REV_CLIENTS' : 'SUPPLIERS' }) }}><option>Поступление</option><option>Списание</option></select></label>
+              <label className="field">Тип<Select value={form.kind} onValueChange={(value) => setForm({ ...form, kind: value })}><option value="manual">Ручной ввод</option><option value="invoice_in">Выставленный счёт клиенту</option><option value="invoice_out">Счёт от поставщика</option><option value="contract">Платёж по договору</option></Select></label>
+              <label className="field">Направление<Select value={form.direction} onValueChange={(value) => { const d = value; setForm({ ...form, direction: d, category: d === 'Поступление' ? 'REV_CLIENTS' : 'SUPPLIERS' }) }}><option>Поступление</option><option>Списание</option></Select></label>
               <label className="field">Сумма, ₽<input type="number" required min={1} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></label>
               <label className="field">Ожидаемая дата<input type="date" required value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></label>
               <label className="field">Описание<input required value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} placeholder="Оплата по счёту № 15" /></label>
               <label className="field">Контрагент<input value={form.counterparty_name} onChange={(e) => setForm({ ...form, counterparty_name: e.target.value })} /></label>
-              <label className="field">Категория<select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>{cats.filter((c) => c.direction === (form.direction === 'Поступление' ? 'in' : 'out')).map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}</select></label>
-              <label className="field">Уверенность, что произойдёт: {fmtPct(form.probability)}<input type="range" min={0.1} max={1} step={0.05} value={form.probability} onChange={(e) => setForm({ ...form, probability: Number(e.target.value) })} /></label>
+              <label className="field">Категория<Select value={form.category} onValueChange={(value) => setForm({ ...form, category: value })}>{cats.filter((c) => c.direction === (form.direction === 'Поступление' ? 'in' : 'out')).map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}</Select></label>
+              <RangeField label="Вероятность события" min={0.1} max={1} step={0.05} value={form.probability} displayValue={fmtPct(form.probability)} ticks={['10%', '40%', '70%', '100%']} onChange={(value) => setForm({ ...form, probability: value })} />
               <button>Добавить в прогноз</button>
             </div>
           </form>
@@ -135,7 +137,7 @@ export default function Calendar() {
       )}
 
       {tab === 'contracts' && (
-        <div className="grid grid-2" style={{ gridTemplateColumns: '2fr 1fr' }}>
+        <div className="grid calendar-layout">
           <div className="card">
             <h2>Договоры и их графики платежей</h2>
             {contracts.length === 0 && <div className="empty">Договоров пока нет — добавьте первый справа. Условия (предоплата, отсрочка, рассрочка) превратятся в ожидаемые платежи.</div>}
@@ -155,13 +157,13 @@ export default function Calendar() {
             <h2>Добавить договор</h2>
             <p className="small muted">Для клиентов ожидаемая дата сдвигается на его типичную задержку оплаты, а разброс даты берётся из истории.</p>
             <div className="grid" style={{ gap: 10 }}>
-              <label className="field">С кем<select value={cform.direction} onChange={(e) => { const d = e.target.value; setCform({ ...cform, direction: d, category: d === 'Поступление' ? 'REV_CLIENTS' : 'SUPPLIERS' }) }}><option value="Поступление">Клиент (нам платят)</option><option value="Списание">Поставщик / подрядчик (мы платим)</option></select></label>
+              <label className="field">С кем<Select value={cform.direction} onValueChange={(value) => { const d = value; setCform({ ...cform, direction: d, category: d === 'Поступление' ? 'REV_CLIENTS' : 'SUPPLIERS' }) }}><option value="Поступление">Клиент (нам платят)</option><option value="Списание">Поставщик / подрядчик (мы платим)</option></Select></label>
               <label className="field">Контрагент<input required value={cform.counterparty_name} onChange={(e) => setCform({ ...cform, counterparty_name: e.target.value })} /></label>
               <div className="row"><label className="field" style={{ flex: 1 }}>ИНН<input value={cform.counterparty_inn} onChange={(e) => setCform({ ...cform, counterparty_inn: e.target.value })} /></label><label className="field" style={{ flex: 1 }}>№ договора<input value={cform.number} onChange={(e) => setCform({ ...cform, number: e.target.value })} /></label></div>
               <label className="field">Сумма договора, ₽<input type="number" required min={1} value={cform.total_amount} onChange={(e) => setCform({ ...cform, total_amount: e.target.value })} /></label>
-              <label className="field">График<select value={cform.schedule_type} onChange={(e) => setCform({ ...cform, schedule_type: e.target.value })}><option value="prepay_final">Предоплата + окончательный расчёт</option><option value="postpay">Оплата после закрытия с отсрочкой</option><option value="equal">Равные платежи ежемесячно</option></select></label>
+              <label className="field">График<Select value={cform.schedule_type} onValueChange={(value) => setCform({ ...cform, schedule_type: value })}><option value="prepay_final">Предоплата + окончательный расчёт</option><option value="postpay">Оплата после закрытия с отсрочкой</option><option value="equal">Равные платежи ежемесячно</option></Select></label>
               <div className="row"><label className="field" style={{ flex: 1 }}>Начало<input type="date" required value={cform.start_date} onChange={(e) => setCform({ ...cform, start_date: e.target.value })} /></label><label className="field" style={{ flex: 1 }}>Закрытие (акт / поставка)<input type="date" value={cform.end_date} onChange={(e) => setCform({ ...cform, end_date: e.target.value })} /></label></div>
-              {cform.schedule_type === 'prepay_final' && <label className="field">Предоплата: {cform.prepayment_pct}%<input type="range" min={0} max={100} step={5} value={cform.prepayment_pct} onChange={(e) => setCform({ ...cform, prepayment_pct: Number(e.target.value) })} /></label>}
+              {cform.schedule_type === 'prepay_final' && <RangeField label="Предоплата по договору" min={0} max={100} step={5} value={cform.prepayment_pct} displayValue={`${cform.prepayment_pct}%`} ticks={['0%', '25%', '50%', '75%', '100%']} onChange={(value) => setCform({ ...cform, prepayment_pct: value })} />}
               {cform.schedule_type === 'equal' && <div className="row"><label className="field" style={{ flex: 1 }}>Число платежей<input type="number" min={1} max={36} value={cform.installments} onChange={(e) => setCform({ ...cform, installments: Number(e.target.value) })} /></label><label className="field" style={{ flex: 1 }}>День месяца<input type="number" min={1} max={31} value={cform.day_of_month} onChange={(e) => setCform({ ...cform, day_of_month: e.target.value })} /></label></div>}
               <label className="field">Отсрочка оплаты, дн.<input type="number" min={0} max={180} value={cform.deferral_days} onChange={(e) => setCform({ ...cform, deferral_days: Number(e.target.value) })} /></label>
               <button>Добавить в прогноз</button>

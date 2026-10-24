@@ -1,3 +1,4 @@
+import useCompactChart from '../hooks/useCompactChart'
 import ReactECharts from 'echarts-for-react'
 import { useEffect, useState } from 'react'
 import { get } from '../api'
@@ -7,6 +8,7 @@ const css = (n: string, f: string) => getComputedStyle(document.documentElement)
 const MODEL_LABELS: Record<string, string> = { naive: 'Наивная (среднее 28 дн.)', seasonal_naive: 'Сезонная наивная (день недели × месяц)', hgb: 'Градиентный бустинг (глобальная модель)' }
 
 export default function Quality() {
+  const compact = useCompactChart()
   const [data, setData] = useState<any>(null)
   useEffect(() => { get('/backtest/').then(setData) }, [])
   if (!data) return <div className="empty">Загрузка…</div>
@@ -14,10 +16,10 @@ export default function Quality() {
   const models: any[] = data.summary.models
   const ink = css('--text-2', '#52514e'), grid = css('--grid', '#e1e0d9'), muted = css('--muted', '#898781'), blue = css('--series-1', '#2a78d6')
   const barOpt = (key: string, title: string, fmt: (v: number) => string) => ({
-    title: { text: title, left: 0, textStyle: { fontSize: 13, color: ink, fontWeight: 600 } },
-    grid: { left: 8, right: 60, top: 32, bottom: 8, containLabel: true },
+    title: { text: compact ? title.split(' (')[0] : title, left: 0, textStyle: { fontSize: compact ? 11 : 13, color: ink, fontWeight: 600 } },
+    grid: { left: 8, right: compact ? 42 : 60, top: 32, bottom: 8, containLabel: true },
     xAxis: { type: 'value', show: false },
-    yAxis: { type: 'category', inverse: true, data: models.map((m) => MODEL_LABELS[m.model] ?? m.model), axisLabel: { color: ink, fontSize: 12, width: 200, overflow: 'truncate' }, axisLine: { show: false }, axisTick: { show: false } },
+    yAxis: { type: 'category', inverse: true, data: models.map((m) => MODEL_LABELS[m.model] ?? m.model), axisLabel: { color: ink, fontSize: 12, width: compact ? 95 : 200, overflow: 'truncate' }, axisLine: { show: false }, axisTick: { show: false } },
     series: [{ type: 'bar', barWidth: 16, data: models.map((m) => m[key]), itemStyle: { color: blue, borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: ink, fontSize: 11, formatter: (p: any) => (p.value === null ? '—' : fmt(p.value)) } }],
   })
   const best = models.find((m) => m.model === 'hgb') ?? models[0]

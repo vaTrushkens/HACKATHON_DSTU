@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
-import { get, post } from '../api'
+import RangeField from '../components/RangeField'
+import Select from '../components/Select'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api, get } from '../api'
 import { useAuth } from '../auth'
 import BalanceChart from '../components/BalanceChart'
 import { addDays, fmtDate, fmtMoney, fmtPct } from '../format'
@@ -21,31 +23,57 @@ export default function Scenarios() {
   const [res, setRes] = useState<{ base: ForecastResponse; scenario: ForecastResponse; delta: any } | null>(null)
   const [history, setHistory] = useState<HistoryPoint[]>([])
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const companyId = company?.id
+  const activeRequest = useRef<AbortController | null>(null)
+  const [editing, setEditing] = useState(false)
+  const currentScenario = useRef(sc)
+  currentScenario.current = sc
 
   useEffect(() => { if (company) get(`/companies/${company.id}/counterparties/`).then((r) => setClients(r.clients ?? [])) }, [company?.id])
 
-  const run = async (override?: Scenario) => {
-    if (!company) return
-    const s = override ?? sc
-    setBusy(true)
+  const run = useCallback(async (scenario: Scenario) => {
+    if (!companyId) return
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
+    setBusy(true); setEditing(false); setError('')
     try {
-      const r = await post(`/companies/${company.id}/scenario/`, { scenario: { ...s, name: 'Негативный сценарий' }, horizon: 60 })
-      setRes(r)
-      const a = r.base.forecast.as_of
-      setHistory(await get(`/companies/${company.id}/history/`, { from: addDays(a, -60), to: a }))
-    } finally { setBusy(false) }
+      const { data } = await api.post<{ base: ForecastResponse; scenario: ForecastResponse; delta: any }>(`/companies/${companyId}/scenario/`,
+        { scenario: { ...scenario, name: 'Негативный сценарий' }, horizon: 60 }, { signal: controller.signal })
+      const asOf = data.base.forecast.as_of
+      const { data: history } = await api.get<HistoryPoint[]>(`/companies/${companyId}/history/`,
+        { params: { from: addDays(asOf, -60), to: asOf }, signal: controller.signal })
+      if (!controller.signal.aborted) { setRes(data); setHistory(history) }
+    } catch {
+      if (!controller.signal.aborted) setError('Не удалось обновить прогноз. Попробуйте пересчитать ещё раз.')
+    } finally {
+      if (activeRequest.current === controller) setBusy(false)
+    }
+  }, [companyId])
+
+  useEffect(() => {
+    setRes(null); setHistory([])
+    run(currentScenario.current)
+    return () => activeRequest.current?.abort()
+  }, [run])
+
+  const previewScenario = (scenario: Scenario) => {
+    activeRequest.current?.abort()
+    activeRequest.current = null
+    setBusy(false); setEditing(true); setSc(scenario)
   }
-  useEffect(() => { run() }, [company?.id])
+  const commitScenario = (scenario: Scenario) => { setSc(scenario); run(scenario) }
 
   const applyPreset = (p: Scenario) => {
     const asOf = res?.base.forecast.as_of ?? new Date().toISOString().slice(0, 10)
     const s: Scenario = { ...p, extra_expenses: (p.extra_expenses ?? []).map((e) => ({ ...e, date: e.date || addDays(asOf, 7) })) }
-    setSc({ revenue_change_pct: 0, fixed_cost_change_pct: 0, delay_client_days: 0, delay_client_key: '', ...s }); run(s)
+    commitScenario({ revenue_change_pct: 0, fixed_cost_change_pct: 0, delay_client_days: 0, delay_client_key: '', ...s })
   }
   const addExtra = () => {
-    if (!extra.date || !extra.amount) return
+    if (!extra.date || Number(extra.amount) <= 0) return
     const s = { ...sc, extra_expenses: [...(sc.extra_expenses ?? []), { date: extra.date, amount: Number(extra.amount), label: extra.label }] }
-    setSc(s); setExtra({ date: '', amount: '', label: 'Внеплановый расход' })
+    commitScenario(s); setExtra({ date: '', amount: '', label: 'Внеплановый расход' })
   }
 
   if (!company) return null
@@ -53,26 +81,29 @@ export default function Scenarios() {
   return (
     <>
       <div className="page-head"><div><h1>Что если</h1><p className="subtitle">Задайте неблагоприятное событие и сразу увидите, как изменится прогноз и появится ли кассовый разрыв. Базовый и негативный сценарии — на одном графике.</p></div></div>
-      <div className="grid" style={{ gridTemplateColumns: '320px 1fr' }}>
-        <div className="grid">
-          <div className="card">
-            <h2>Готовые сценарии</h2>
-            {PRESETS.map((p) => <button key={p.name} className="secondary" style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 6 }} onClick={() => applyPreset(p.sc)}>{p.name}</button>)}
-          </div>
-          <div className="card">
-            <h2>Свой сценарий</h2>
-            <label className="field">Выручка: {sc.revenue_change_pct! > 0 ? '+' : ''}{sc.revenue_change_pct}%<input type="range" min={-50} max={30} step={5} value={sc.revenue_change_pct} onChange={(e) => setSc({ ...sc, revenue_change_pct: Number(e.target.value) })} /></label>
-            <label className="field" style={{ marginTop: 8 }}>Постоянные расходы: {sc.fixed_cost_change_pct! > 0 ? '+' : ''}{sc.fixed_cost_change_pct}%<input type="range" min={-20} max={50} step={5} value={sc.fixed_cost_change_pct} onChange={(e) => setSc({ ...sc, fixed_cost_change_pct: Number(e.target.value) })} /></label>
-            <label className="field" style={{ marginTop: 8 }}>Задержка оплаты клиентами: {sc.delay_client_days} дн.<input type="range" min={0} max={45} step={7} value={sc.delay_client_days} onChange={(e) => setSc({ ...sc, delay_client_days: Number(e.target.value) })} /></label>
-            <label className="field" style={{ marginTop: 8 }}>Какой клиент<select value={sc.delay_client_key ?? ''} onChange={(e) => setSc({ ...sc, delay_client_key: e.target.value || null })}><option value="">Все ожидаемые поступления от клиентов</option>{clients.slice(0, 10).map((c) => <option key={c.inn + c.name} value={c.name}>{c.name} ({fmtPct(c.share)})</option>)}</select></label>
+      <section className="scenario-presets" aria-label="Готовые сценарии">
+        <h2>Готовые сценарии</h2>
+        <div className="preset-list">{PRESETS.map((p, i) => <button key={p.name} className="preset-card" disabled={busy} onClick={() => applyPreset(p.sc)}><span className="preset-icon" aria-hidden="true">{['↗', '%', '₽', '+', '↔'][i]}</span><span>{p.name}</span></button>)}</div>
+      </section>
+      <div className="scenario-calculator">
+        <h2 className="calculator-title">Рассчитать свой сценарий</h2>
+        <div className="scenario-controls">
+          <div className="scenario-form">
+
+            <RangeField label="Изменение выручки" min={-50} max={30} step={5} value={sc.revenue_change_pct ?? 0} displayValue={`${(sc.revenue_change_pct ?? 0) > 0 ? '+' : ''}${sc.revenue_change_pct ?? 0}%`} ticks={[{ value: -50, label: '−50%' }, { value: -25, label: '−25%' }, { value: 0, label: '0%' }, { value: 30, label: '+30%' }]} onChange={(value) => previewScenario({ ...sc, revenue_change_pct: value })} onCommit={(value) => commitScenario({ ...sc, revenue_change_pct: value })} />
+            <RangeField label="Изменение постоянных расходов" min={-20} max={50} step={5} value={sc.fixed_cost_change_pct ?? 0} displayValue={`${(sc.fixed_cost_change_pct ?? 0) > 0 ? '+' : ''}${sc.fixed_cost_change_pct ?? 0}%`} ticks={[{ value: -20, label: '−20%' }, { value: 0, label: '0%' }, { value: 25, label: '+25%' }, { value: 50, label: '+50%' }]} onChange={(value) => previewScenario({ ...sc, fixed_cost_change_pct: value })} onCommit={(value) => commitScenario({ ...sc, fixed_cost_change_pct: value })} />
+            <RangeField label="Задержка оплаты клиентами" min={0} max={45} step={1} value={sc.delay_client_days ?? 0} displayValue={`${sc.delay_client_days ?? 0} дн.`} ticks={['0', '15 дней', '30 дней', '45 дней']} onChange={(value) => previewScenario({ ...sc, delay_client_days: value })} onCommit={(value) => commitScenario({ ...sc, delay_client_days: value })} />
+            <label className="field" style={{ marginTop: 8 }}>Какой клиент<Select value={sc.delay_client_key ?? ''} onValueChange={(value) => commitScenario({ ...sc, delay_client_key: value || null })}><option value="">Все ожидаемые поступления от клиентов</option>{clients.slice(0, 10).map((c) => <option key={c.inn + c.name} value={c.name}>{c.name} ({fmtPct(c.share)})</option>)}</Select></label>
             <h3 style={{ marginTop: 12 }}>Внеплановый расход</h3>
-            <div className="row"><input type="date" value={extra.date} onChange={(e) => setExtra({ ...extra, date: e.target.value })} /><input type="number" placeholder="Сумма" value={extra.amount} onChange={(e) => setExtra({ ...extra, amount: e.target.value })} style={{ width: 120 }} /></div>
-            <div className="row" style={{ marginTop: 6 }}><input value={extra.label} onChange={(e) => setExtra({ ...extra, label: e.target.value })} style={{ flex: 1 }} /><button className="secondary" onClick={addExtra}>+</button></div>
-            {(sc.extra_expenses ?? []).map((e, i) => <div key={i} className="small muted">• {fmtDate(e.date)} — {e.label}: {fmtMoney(e.amount)} <button className="ghost" onClick={() => setSc({ ...sc, extra_expenses: sc.extra_expenses!.filter((_, j) => j !== i) })}>×</button></div>)}
-            <button style={{ marginTop: 12, width: '100%' }} onClick={() => run()} disabled={busy}>{busy ? 'Считаем…' : 'Пересчитать прогноз'}</button>
+            <div className="expense-fields"><input aria-label="Дата внепланового расхода" type="date" value={extra.date} onChange={(e) => setExtra({ ...extra, date: e.target.value })} /><input aria-label="Сумма внепланового расхода" type="number" min={1} placeholder="Сумма, ₽" value={extra.amount} onChange={(e) => setExtra({ ...extra, amount: e.target.value })} style={{ width: 120 }} /></div>
+            <div className="expense-description"><input aria-label="Описание внепланового расхода" value={extra.label} onChange={(e) => setExtra({ ...extra, label: e.target.value })} style={{ flex: 1 }} /><button className="secondary" onClick={addExtra} aria-label="Добавить расход">+</button></div>
+            {(sc.extra_expenses ?? []).map((e, i) => <div key={i} className="small muted">• {fmtDate(e.date)} — {e.label}: {fmtMoney(e.amount)} <button className="ghost" onClick={() => commitScenario({ ...sc, extra_expenses: sc.extra_expenses!.filter((_, j) => j !== i) })}>×</button></div>)}
+            <button style={{ marginTop: 12, width: '100%' }} onClick={() => run(sc)} disabled={busy}>{busy ? 'Считаем…' : 'Пересчитать прогноз'}</button>
           </div>
         </div>
-        <div className="grid">
+        <div className="grid scenario-results" aria-busy={busy}>
+          <div className="forecast-status" role="status" aria-live="polite">{editing ? 'Отпустите ползунок, чтобы обновить прогноз' : busy ? 'Обновляем прогноз…' : error ? 'Не удалось обновить прогноз' : 'Прогноз обновлён'}</div>
+          {error && <div className="card error" role="alert">{error}</div>}
           {b && s && (
             <>
               <div className="kpi-row">
@@ -88,7 +119,7 @@ export default function Scenarios() {
               <div className={`card risk-card ${s.risk.level}`}><div className="risk-summary">{s.risk.summary}</div><p className="explain">{s.risk.explanation}</p></div>
             </>
           )}
-          {!res && <div className="empty">Считаем базовый сценарий…</div>}
+          {!res && !error && <div className="empty">Считаем базовый сценарий…</div>}
         </div>
       </div>
     </>

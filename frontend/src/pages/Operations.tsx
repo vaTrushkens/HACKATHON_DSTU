@@ -1,3 +1,6 @@
+import { chartTooltip } from '../chartTheme'
+import useCompactChart from '../hooks/useCompactChart'
+import Select from '../components/Select'
 import ReactECharts from 'echarts-for-react'
 import { useEffect, useState } from 'react'
 import { get, patch, post } from '../api'
@@ -9,6 +12,7 @@ const css = (n: string, f: string) => getComputedStyle(document.documentElement)
 const SRC: Record<string, string> = { rule: 'правило', counterparty: 'по контрагенту', ml: 'ML', manual: 'вручную', fallback: 'не определено' }
 
 export default function Operations() {
+  const compact = useCompactChart()
   const { company, refreshCompanies } = useAuth()
   const [cats, setCats] = useState<Category[]>([])
   const [summary, setSummary] = useState<any>(null)
@@ -53,11 +57,11 @@ export default function Operations() {
         <h2>{title}</h2>
         {data.length === 0 ? <div className="empty">Нет данных</div> : (
           <ReactECharts notMerge style={{ height: 30 * data.length + 40 }} option={{
-            grid: { left: 8, right: 70, top: 4, bottom: 4, containLabel: true },
-            tooltip: { formatter: (p: any) => `<b>${data[p.dataIndex].label}</b><br/>${fmtMoney(data[p.dataIndex].total)} за ${months} мес. · ${data[p.dataIndex].n} операций` },
+            grid: { left: 8, right: compact ? 52 : 70, top: 4, bottom: 4, containLabel: true },
+            tooltip: { ...chartTooltip, formatter: (p: any) => `<b>${data[p.dataIndex].label}</b><br/>${fmtMoney(data[p.dataIndex].total)} за ${months} мес. · ${data[p.dataIndex].n} операций` },
             xAxis: { type: 'value', show: false },
-            yAxis: { type: 'category', inverse: true, data: data.map((r) => r.label), axisLabel: { color: css('--text-2', '#52514e'), fontSize: 12, width: 190, overflow: 'truncate' }, axisLine: { show: false }, axisTick: { show: false } },
-            series: [{ type: 'bar', barWidth: 14, data: data.map((r) => r.monthly_avg), itemStyle: { color: css('--series-1', '#2a78d6'), borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: css('--text-2', '#52514e'), fontSize: 11, formatter: (p: any) => `${fmtShort(p.value)} / мес` } }],
+            yAxis: { type: 'category', inverse: true, data: data.map((r) => r.label), axisLabel: { color: css('--text-2', '#52514e'), fontSize: 12, width: compact ? 90 : 190, overflow: 'truncate' }, axisLine: { show: false }, axisTick: { show: false } },
+            series: [{ type: 'bar', barWidth: 14, data: data.map((r) => r.monthly_avg), itemStyle: { color: css('--series-1', '#2a78d6'), borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: css('--text-2', '#52514e'), fontSize: 11, formatter: (p: any) => compact ? fmtShort(p.value) : `${fmtShort(p.value)} / мес` } }],
           }} />
         )}
       </div>
@@ -75,7 +79,7 @@ export default function Operations() {
       {uploadMsg && <div className="card tight small" style={{ marginBottom: 12 }}>{uploadMsg}</div>}
 
       <div className="toolbar">
-        <label className="field">Период структуры<select value={months} onChange={(e) => setMonths(Number(e.target.value))}><option value={1}>1 месяц</option><option value={3}>3 месяца</option><option value={6}>6 месяцев</option><option value={12}>12 месяцев</option></select></label>
+        <label className="field">Период структуры<Select value={months} onValueChange={(value) => setMonths(Number(value))}><option value={1}>1 месяц</option><option value={3}>3 месяца</option><option value={6}>6 месяцев</option><option value={12}>12 месяцев</option></Select></label>
         {summary && <div className="small muted">Покрытие категоризации: <b>{fmtPct(summary.coverage)}</b> · источники: {Object.entries(summary.sources ?? {}).map(([k, v]) => `${SRC[k] ?? k} ${v}`).join(', ')}</div>}
       </div>
       {summary && <div className="grid grid-2" style={{ marginBottom: 16 }}>{bar(summary.inflow ?? [], 'Поступления по категориям (в среднем за месяц)')}{bar(summary.outflow ?? [], 'Списания по категориям (в среднем за месяц)')}</div>}
@@ -83,8 +87,8 @@ export default function Operations() {
       <div className="card">
         <div className="toolbar">
           <input placeholder="Поиск по контрагенту, назначению, ИНН" value={filters.search} onChange={(e) => { setPage(1); setFilters({ ...filters, search: e.target.value }) }} style={{ width: 320 }} />
-          <select value={filters.direction} onChange={(e) => { setPage(1); setFilters({ ...filters, direction: e.target.value }) }}><option value="">Все направления</option><option>Поступление</option><option>Списание</option></select>
-          <select value={filters.category} onChange={(e) => { setPage(1); setFilters({ ...filters, category: e.target.value }) }}><option value="">Все категории</option>{cats.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}</select>
+          <Select aria-label="Направление операции" value={filters.direction} onValueChange={(value) => { setPage(1); setFilters({ ...filters, direction: value }) }}><option value="">Все направления</option><option>Поступление</option><option>Списание</option></Select>
+          <Select aria-label="Фильтр по категории" value={filters.category} onValueChange={(value) => { setPage(1); setFilters({ ...filters, category: value }) }}><option value="">Все категории</option>{cats.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}</Select>
           <span className="muted small">найдено {count}</span>
         </div>
         <table>
@@ -97,9 +101,9 @@ export default function Operations() {
                 <td className="small" style={{ maxWidth: 380 }}>{o.payment_purpose || <span className="muted">— пустое назначение —</span>}</td>
                 <td className={`num ${o.direction === 'Поступление' ? 'pos' : 'neg'}`}>{o.direction === 'Поступление' ? '+' : '−'}{fmtMoney(o.amount)}</td>
                 <td>
-                  <select value={o.category} onChange={(e) => changeCategory(o, e.target.value)} style={{ padding: '4px 6px', maxWidth: 220 }}>
+                  <Select aria-label="Категория операции" value={o.category} onValueChange={(value) => changeCategory(o, value)} style={{ padding: '4px 6px', maxWidth: 220 }}>
                     {cats.filter((c) => c.direction === (o.direction === 'Поступление' ? 'in' : 'out')).map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
-                  </select>
+                  </Select>
                   <div className="small muted">{SRC[o.category_source] ?? o.category_source} · {fmtPct(o.category_confidence)}</div>
                 </td>
                 <td className={`num ${Number(o.balance_eod) < 0 ? 'neg' : ''}`}>{fmtMoney(o.balance_eod)}</td>

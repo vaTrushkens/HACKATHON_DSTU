@@ -1,5 +1,6 @@
+import { chartTooltip } from '../chartTheme'
 import ReactECharts from 'echarts-for-react'
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import type { DailyPoint, ForecastEvent, HistoryPoint } from '../types'
 import { fmtDate, fmtMoney, fmtShort, sourceLabel } from '../format'
 
@@ -14,9 +15,12 @@ type Props = {
   height?: number
 }
 
+const EMPTY_EVENTS: ForecastEvent[] = []
+const EMPTY_HISTORY: HistoryPoint[] = []
+
 const css = (name: string, fallback: string) => (typeof window !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback : fallback)
 
-export default function BalanceChart({ daily, events = [], history = [], actual = [], compare, compareLabel = 'Сценарий', minBalance = 0, height = 360 }: Props) {
+export default memo(function BalanceChart({ daily, events = EMPTY_EVENTS, history = EMPTY_HISTORY, actual = EMPTY_HISTORY, compare, compareLabel = 'Сценарий', minBalance = 0, height = 360 }: Props) {
   const option = useMemo(() => {
     const blue = css('--series-1', '#2a78d6')
     const orange = css('--series-2', '#eb6834')
@@ -58,9 +62,13 @@ export default function BalanceChart({ daily, events = [], history = [], actual 
       },
     })
     return {
-      animationDuration: 300,
-      grid: { left: 64, right: 24, top: 24, bottom: 40 },
+      animationDuration: 0,
+      animationDurationUpdate: 280,
+      animationEasingUpdate: 'cubicOut',
+      textStyle: { fontFamily: 'Arial, Helvetica, sans-serif' },
+      grid: { left: 52, right: 16, top: 24, bottom: 40 },
       tooltip: {
+        ...chartTooltip,
         trigger: 'axis', axisPointer: { type: 'line', lineStyle: { color: muted } },
         formatter: (params: any[]) => {
           const date = params[0]?.axisValue
@@ -74,14 +82,14 @@ export default function BalanceChart({ daily, events = [], history = [], actual 
           return lines.join('<br/>')
         },
       },
-      xAxis: { type: 'time', axisLine: { lineStyle: { color: grid } }, axisLabel: { color: muted, formatter: (v: number) => { const dt = new Date(v); return `${dt.getDate()}.${String(dt.getMonth() + 1).padStart(2, '0')}` } }, splitLine: { show: false } },
+      xAxis: { type: 'time', axisLine: { lineStyle: { color: grid } }, axisLabel: { color: muted, hideOverlap: true, fontSize: 11, formatter: (v: number) => { const dt = new Date(v); return `${dt.getDate()}.${String(dt.getMonth() + 1).padStart(2, '0')}` } }, splitLine: { show: false } },
       yAxis: { type: 'value', axisLabel: { color: muted, formatter: (v: number) => fmtShort(v) }, splitLine: { lineStyle: { color: grid } }, axisLine: { show: false } },
       series,
     }
   }, [daily, events, history, actual, compare, compareLabel, minBalance])
 
   return (
-    <div>
+    <div className="balance-chart">
       <ReactECharts option={option} style={{ height }} notMerge />
       <div className="legend">
         <span><i style={{ background: 'var(--text-2)' }} />Факт</span>
@@ -93,4 +101,4 @@ export default function BalanceChart({ daily, events = [], history = [], actual 
       </div>
     </div>
   )
-}
+})

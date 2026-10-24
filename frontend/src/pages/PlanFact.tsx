@@ -1,3 +1,5 @@
+import { chartTooltip } from '../chartTheme'
+import Select from '../components/Select'
 import ReactECharts from 'echarts-for-react'
 import { useEffect, useState } from 'react'
 import { get } from '../api'
@@ -22,10 +24,10 @@ export default function PlanFact() {
   const weekOpt = (planKey: string, factKey: string, title: string) => ({
     title: { text: title, left: 0, textStyle: { fontSize: 13, color: ink, fontWeight: 600 } },
     grid: { left: 56, right: 12, top: 36, bottom: 28 },
-    tooltip: { trigger: 'axis', formatter: (p: any[]) => `<b>неделя до ${fmtDate(p[0].axisValue)}</b><br/>` + p.map((x) => `${x.marker} ${x.seriesName}: <b>${x.value === null || x.value === undefined ? '—' : fmtMoney(x.value)}</b>`).join('<br/>') },
+    tooltip: { ...chartTooltip, trigger: 'axis', formatter: (p: any[]) => `<b>неделя до ${fmtDate(p[0].axisValue)}</b><br/>` + p.map((x) => `${x.marker} ${x.seriesName}: <b>${x.value === null || x.value === undefined ? '—' : fmtMoney(x.value)}</b>`).join('<br/>') },
     legend: { bottom: 0, textStyle: { color: ink, fontSize: 11 }, icon: 'roundRect' },
-    xAxis: { type: 'category', data: weeks.map((w) => w.week_end), axisLabel: { color: muted, formatter: (v: string) => fmtDate(v).slice(0, 6) }, axisLine: { lineStyle: { color: grid } } },
-    yAxis: { type: 'value', axisLabel: { color: muted, formatter: (v: number) => fmtShort(v) }, splitLine: { lineStyle: { color: grid } } },
+    xAxis: { type: 'category', data: weeks.map((w) => w.week_end), axisLabel: { color: muted, hideOverlap: true, formatter: (v: string) => fmtDate(v).slice(0, 6) }, axisLine: { lineStyle: { color: grid } } },
+    yAxis: { type: 'value', axisLabel: { color: muted, hideOverlap: true, formatter: (v: number) => fmtShort(v) }, splitLine: { lineStyle: { color: grid } } },
     series: [
       { name: 'План', type: 'bar', data: weeks.map((w) => w[planKey]), itemStyle: { color: soft, borderColor: blue, borderWidth: 1.5, borderRadius: [4, 4, 0, 0] }, barGap: '10%' },
       { name: 'Факт', type: 'bar', data: weeks.map((w) => w[factKey]), itemStyle: { color: blue, borderRadius: [4, 4, 0, 0] } },
@@ -34,9 +36,9 @@ export default function PlanFact() {
   const daily: any[] = data?.daily ?? []
   const balOpt = {
     grid: { left: 56, right: 12, top: 12, bottom: 28 },
-    tooltip: { trigger: 'axis', formatter: (p: any[]) => `<b>${fmtDate(p[0].axisValue)}</b><br/>` + p.filter((x) => x.value?.[1] !== null && x.value?.[1] !== undefined && x.seriesName !== 'p10' && x.seriesName !== 'коридор').map((x) => `${x.marker} ${x.seriesName}: <b>${fmtMoney(x.value[1])}</b>`).join('<br/>') },
-    xAxis: { type: 'time', axisLabel: { color: muted }, axisLine: { lineStyle: { color: grid } } },
-    yAxis: { type: 'value', axisLabel: { color: muted, formatter: (v: number) => fmtShort(v) }, splitLine: { lineStyle: { color: grid } } },
+    tooltip: { ...chartTooltip, trigger: 'axis', formatter: (p: any[]) => `<b>${fmtDate(p[0].axisValue)}</b><br/>` + p.filter((x) => x.value?.[1] !== null && x.value?.[1] !== undefined && x.seriesName !== 'p10' && x.seriesName !== 'коридор').map((x) => `${x.marker} ${x.seriesName}: <b>${fmtMoney(x.value[1])}</b>`).join('<br/>') },
+    xAxis: { type: 'time', axisLabel: { color: muted, hideOverlap: true }, axisLine: { lineStyle: { color: grid } } },
+    yAxis: { type: 'value', axisLabel: { color: muted, hideOverlap: true, formatter: (v: number) => fmtShort(v) }, splitLine: { lineStyle: { color: grid } } },
     series: [
       { name: 'p10', type: 'line', stack: 'b', data: daily.map((d) => [d.date, d.p10]), showSymbol: false, lineStyle: { opacity: 0 }, silent: true },
       { name: 'коридор', type: 'line', stack: 'b', data: daily.map((d) => [d.date, d.p90 - d.p10]), showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: blue, opacity: 0.14 }, silent: true },
@@ -48,7 +50,7 @@ export default function PlanFact() {
     <>
       <div className="page-head">
         <div><h1>План-факт</h1><p className="subtitle">Сохранённый прогноз против того, что произошло. Расхождения подсвечены; ожидаемые платежи, которые не пришли в срок, помечаются и прогноз пересчитывается без них.</p></div>
-        <label className="field">Снапшот прогноза<select value={runId} onChange={(e) => setRunId(e.target.value ? Number(e.target.value) : '')}><option value="">автоматически (самый свежий с ≥ 7 дн. факта)</option>{runs.map((r) => <option key={r.id} value={r.id}>от {fmtDate(r.as_of)} · {r.horizon_days} дн. · {r.risk?.summary}</option>)}</select></label>
+        <label className="field">Снапшот прогноза<Select value={runId} onValueChange={(value) => setRunId(value ? Number(value) : '')}><option value="">автоматически (самый свежий с ≥ 7 дн. факта)</option>{runs.map((r) => <option key={r.id} value={r.id}>от {fmtDate(r.as_of)} · {r.horizon_days} дн. · {r.risk?.summary}</option>)}</Select></label>
       </div>
       {data?.detail && <div className="card">{data.detail}<div className="small muted" style={{ marginTop: 6 }}>Подсказка для демо: на «Обзоре» поставьте дату «сегодня» на месяц раньше последней операции и нажмите «Применить» — снапшот сохранится, а факт за этот месяц станет сравнением.</div></div>}
       {data?.run && (
