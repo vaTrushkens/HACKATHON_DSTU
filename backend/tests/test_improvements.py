@@ -93,3 +93,23 @@ def test_repeated_forecast_reuses_snapshot(client_and_company):  # noqa: F811
     PlannedEvent.objects.create(company=company, date="2025-11-20", amount=1000, direction="Списание", category="OTHER_OUT", label="x")
     assert run(company, as_of="2025-11-15", horizon=30, model=NaiveMeanModel())["run_id"] != first
     assert ForecastRun.objects.filter(company=company).count() == 2
+
+
+def test_file_logging_creates_rotating_masked_logs(client_and_company):  # noqa: F811
+    """Логи пишутся в файлы автоматически, с ротацией и маскированием, команды дублируют вывод в commands.log."""
+    import logging
+    from django.core.management import call_command
+    from io import StringIO
+    app_log = settings.LOG_DIR / "app.log"
+    commands_log = settings.LOG_DIR / "commands.log"
+    logging.getLogger("apps.test_logging").info("ИНН контрагента %s сумма %s", "007934320607", "amount=12345.67")
+    for h in logging.getLogger().handlers:
+        h.flush()
+    text = app_log.read_text(encoding="utf-8")
+    assert "007934320607" not in text and "<ИНН>" in text
+    assert all(isinstance(h, logging.handlers.RotatingFileHandler) and h.maxBytes > 0 for h in logging.getLogger().handlers if getattr(h, "baseFilename", "").endswith("app.log"))
+    call_command("send_notifications", "--dry-run", stdout=StringIO())
+    for h in logging.getLogger("commands").handlers:
+        h.flush()
+    tail = commands_log.read_text(encoding="utf-8")
+    assert "start send_notifications" in tail and "finished send_notifications" in tail

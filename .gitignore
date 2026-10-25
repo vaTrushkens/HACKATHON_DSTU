@@ -15,3 +15,6 @@ frontend/dist/
 server_err.txt
 *.tsbuildinfo
 backend/test_db.sqlite3
+
+# файловые логи (создаются автоматически)
+backend/logs/

@@ -150,6 +150,7 @@ h3 { margin: 0 0 10px; font-size: 16px; font-weight: 600; }
 .alert .dot { flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--muted); }
 .alert.high .dot { background: var(--critical); }
 .alert.medium .dot { background: var(--warning); }
+.alert.low .dot { background: var(--warning); opacity: .6; }
 .alert.info .dot { background: var(--brand); }
 .alert .title { font-weight: 600; }
 .alert .msg { margin-top: 5px; color: var(--text-2); }

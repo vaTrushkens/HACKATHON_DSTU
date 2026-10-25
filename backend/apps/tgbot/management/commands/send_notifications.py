@@ -1,9 +1,9 @@
-from django.core.management.base import BaseCommand
+from core.commands import LoggedCommand
 
 from apps.tgbot import services
 
 
-class Command(BaseCommand):
+class Command(LoggedCommand):
     help = "Разовая рассылка уведомлений в Telegram (то же, что делает бот по расписанию). --dry-run — только посчитать"
 
     def add_arguments(self, parser):

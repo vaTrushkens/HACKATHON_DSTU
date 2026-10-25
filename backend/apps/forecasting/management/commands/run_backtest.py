@@ -6,14 +6,15 @@
 """
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from core.commands import LoggedCommand
 from apps.forecasting.evaluation import evaluate
 
 from apps.companies.models import Company
 from cashflow_core.backtest import BacktestConfig
 
 
-class Command(BaseCommand):
+class Command(LoggedCommand):
     help = "Запускает бэктест и сохраняет результаты для экрана «Качество модели»"
 
     def add_arguments(self, parser):

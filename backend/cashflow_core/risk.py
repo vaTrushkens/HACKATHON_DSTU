@@ -14,8 +14,10 @@ import pandas as pd
 from .categories import LABELS, MANDATORY_CODES
 from .forecast.engine import ForecastResult
 
-P_HIGH = 0.6
-P_MEDIUM = 0.3
+# Пороги уровня риска по вероятности хотя бы одного разрыва за горизонт. База разрывов в данных ≈ 5 %,
+# поэтому 20 % — уже четырёхкратное превышение («есть риск»), 50 % — «высокий риск».
+P_HIGH = 0.5
+P_MEDIUM = 0.2
 P_DATE = 0.5  # дата разрыва — первый день, когда вероятность ≥ 50%
 
 
@@ -186,6 +188,8 @@ def _summary(level, prob, gap_date, gap_date_p10, deficit_p50, deficit_p10, res)
     if level in ("medium", "high"):
         d = gap_date or gap_date_p10
         return f"Риск нехватки {prob:.0%}" + (f", ближе к {fmt_date(d)}" if d is not None else "")
+    if gap_date_p10 is not None:
+        return f"Риск низкий ({prob:.0%}), но в плохом случае к {fmt_date(gap_date_p10)} может не хватить до {fmt_money(deficit_p10)}"
     return "Денег хватает на весь горизонт прогноза"
 
 
@@ -236,6 +240,9 @@ def _alerts(res, level, prob, gap_date, gap_date_p10, deficit_p50, deficit_p10, 
     elif level == "medium":
         d = gap_date or gap_date_p10
         alerts.append(Alert("medium", "cash_gap", "Возможна нехватка денег", f"Вероятность {prob:.0%}" + (f", ближе к {fmt_date(d)}" if d is not None else "") + f". В плохом случае не хватит до {fmt_money(deficit_p10)}.", _s(d), round(deficit_p10, 2), round(prob, 3)))
+    elif gap_date_p10 is not None:
+        # Ранний сигнал: вероятность пока низкая, но пессимистичные траектории уже пересекают порог.
+        alerts.append(Alert("low", "early_warning", f"Ранний сигнал: {fmt_date(gap_date_p10)}", f"В неблагоприятном сценарии (худшие 10 % траекторий) остаток уйдёт ниже порога {fmt_date(gap_date_p10)}, нехватка до {fmt_money(deficit_p10)}. Вероятность пока {prob:.0%}: следите за поступлениями и крупными платежами до этой даты.", _s(gap_date_p10), round(deficit_p10, 2), round(prob, 3)))
     if runway is not None and runway <= 14 and level != "high":
         alerts.append(Alert("medium", "low_runway", f"Денег хватит примерно на {runway} дн.", "По медианному прогнозу остаток станет ниже порога раньше чем через две недели.", None, None, None))
     # крупные платежи впереди относительно текущего остатка

@@ -1,8 +1,8 @@
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from core.commands import LoggedCommand
 
 
-class Command(BaseCommand):
+class Command(LoggedCommand):
     help = "Запускает Telegram-бота (long polling) и фоновую рассылку уведомлений"
 
     def handle(self, *args, **opts):

@@ -204,7 +204,9 @@ def _mark_sync(company: Company, kind: str, error: str = "") -> None:
 
 def _replace_events(company: Company, source: str, events: list[dict]) -> int:
     with transaction.atomic():  # атомарна только замена событий: статус ошибки коннектора должен сохраниться при исключении
-        PlannedEvent.objects.filter(company=company, source=source, status="expected").delete()
+        # Заменяем все события источника, включая уже сопоставленные с фактом: иначе повторная
+        # синхронизация создаёт дубли, а статусы восстанавливает refresh_event_statuses.
+        PlannedEvent.objects.filter(company=company, source=source).exclude(status="cancelled").delete()
         objs = [PlannedEvent(company=company, **{k: (Decimal(str(v)) if k == "amount" else v) for k, v in e.items()}) for e in events]
         PlannedEvent.objects.bulk_create(objs)
     return len(objs)

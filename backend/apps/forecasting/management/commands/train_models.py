@@ -10,7 +10,8 @@ from __future__ import annotations
 import time
 
 import pandas as pd
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from core.commands import LoggedCommand
 
 from apps.companies.models import Company
 from apps.forecasting import services as fc_services
@@ -21,7 +22,7 @@ from cashflow_core.forecast.models import HGBFlowModel, build_training_panel
 from cashflow_core.forecast.series import daily_flows
 
 
-class Command(BaseCommand):
+class Command(LoggedCommand):
     help = "Обучает категоризатор и модель прогноза потоков"
 
     def add_arguments(self, parser):

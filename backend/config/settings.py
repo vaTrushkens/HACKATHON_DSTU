@@ -141,12 +141,27 @@ TELEGRAM_NOTIFY_INTERVAL_MIN = int(os.getenv("TELEGRAM_NOTIFY_INTERVAL_MIN", "30
 TELEGRAM_REMIND_DAYS = int(os.getenv("TELEGRAM_REMIND_DAYS", "3"))
 
 # ---- логирование: чувствительные данные (ИНН, суммы, контрагенты, назначения) маскируются ----
+# Файлы создаются автоматически в LOG_DIR (по умолчанию backend/logs/, в git не попадает) и ротируются
+# по размеру: app.log — сервер и бот, commands.log — вывод management-команд (импорт, обучение, бэктест).
+LOG_DIR = Path(os.getenv("LOG_DIR", BASE_DIR / "logs" / ("pytest" if RUNNING_TESTS else "")))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+_file_handler = {"class": "logging.handlers.RotatingFileHandler", "formatter": "std", "filters": ["mask_sensitive"], "maxBytes": LOG_MAX_BYTES, "backupCount": LOG_BACKUP_COUNT, "encoding": "utf-8"}
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "filters": {"mask_sensitive": {"()": "core.logging_filters.SensitiveDataFilter"}},
     "formatters": {"std": {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"}},
-    "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "std", "filters": ["mask_sensitive"]}},
-    "root": {"handlers": ["console"], "level": os.getenv("LOG_LEVEL", "INFO")},
-    "loggers": {"django.db.backends": {"level": "WARNING"}, "httpx": {"level": "WARNING"}},  # SQL с данными операций и URL Telegram API с токеном в логи не пишем
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "std", "filters": ["mask_sensitive"]},
+        "app_file": {**_file_handler, "filename": str(LOG_DIR / "app.log")},
+        "commands_file": {**_file_handler, "filename": str(LOG_DIR / "commands.log")},
+    },
+    "root": {"handlers": ["console", "app_file"], "level": os.getenv("LOG_LEVEL", "INFO")},
+    "loggers": {
+        "commands": {"handlers": ["commands_file"], "level": "INFO", "propagate": False},  # см. core.commands.LoggedCommand
+        "django.db.backends": {"level": "WARNING"},  # SQL с данными операций в логи не пишем
+        "httpx": {"level": "WARNING"},  # URL Telegram API содержит токен
+    },
 }

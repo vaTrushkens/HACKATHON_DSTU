@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.management.base import BaseCommand
+from core.commands import LoggedCommand
 
 from apps.accounts.models import CompanyMembership
 from apps.companies.models import Company
@@ -21,7 +21,7 @@ from cashflow_core import ingest
 log = logging.getLogger(__name__)
 
 
-class Command(BaseCommand):
+class Command(LoggedCommand):
     help = "Импортирует синтетические выписки кейса в базу"
 
     def add_arguments(self, parser):

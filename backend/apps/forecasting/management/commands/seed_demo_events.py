@@ -13,7 +13,7 @@ import re
 from decimal import Decimal
 
 import pandas as pd
-from django.core.management.base import BaseCommand
+from core.commands import LoggedCommand
 
 from apps.companies.models import Company
 from apps.operations import services as ops_services
@@ -24,7 +24,7 @@ from cashflow_core.recurring import counterparty_payment_delays
 DOC_DATE_RE = re.compile(r"от (\d{2}\.\d{2}\.\d{4})")
 
 
-class Command(BaseCommand):
+class Command(LoggedCommand):
     def add_arguments(self, parser):
         parser.add_argument("--company", required=True)
         parser.add_argument("--as-of", required=True)

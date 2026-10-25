@@ -12,7 +12,8 @@ import pandas as pd
 import hashlib
 import json
 from pathlib import Path
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+from core.commands import LoggedCommand
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix
 
 from apps.forecasting.models import BacktestResult
@@ -23,7 +24,7 @@ from cashflow_core.categorizer import Categorizer
 from cashflow_core.categorizer.pipeline import apply_rules, propagate_by_counterparty
 
 
-class Command(BaseCommand):
+class Command(LoggedCommand):
     def add_arguments(self, parser):
         parser.add_argument("--sample", required=True)
         parser.add_argument("--labels", required=True)
