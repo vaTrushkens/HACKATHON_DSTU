@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.sqlite3
+.pytest_cache/
+staticfiles/
+.env
+# модели монтируются volume-ом из docker-compose, в образ не копируем
+models_store/
