@@ -42,6 +42,7 @@ def sync_recurring_patterns(company: Company, as_of=None) -> int:
             category=p.category, direction=p.direction, counterparty_name=p.counterparty_name[:255], counterparty_inn=p.counterparty_inn[:12], subtype=p.subtype, label=p.label[:255],
             period=p.period, day_of_month=p.day_of_month, weekday=p.weekday, amount=Decimal(str(p.amount)), amount_cv=p.amount_cv, occurrences=p.occurrences,
             first_date=p.first_date, last_date=p.last_date, confidence=p.confidence, active=p.active, history=p.history,
+            probability=p.probability, timing_std_days=p.timing_std_days, purpose_hint=p.purpose_hint[:64],
         )
         if row:
             for k, v in fields.items():
@@ -63,6 +64,7 @@ def core_patterns(company: Company) -> list[CorePattern]:
                 key=r.key, category=r.category, direction=r.direction, counterparty_name=r.counterparty_name, counterparty_inn=r.counterparty_inn, subtype=r.subtype, period=r.period,
                 day_of_month=r.day_of_month, weekday=r.weekday, amount=float(r.amount), amount_cv=r.amount_cv, occurrences=r.occurrences, last_date=r.last_date, first_date=r.first_date,
                 confidence=r.confidence, active=r.active, label=r.label, history=r.history,
+                probability=r.probability, timing_std_days=r.timing_std_days, purpose_hint=r.purpose_hint,
             )
         )
     return out

@@ -58,7 +58,7 @@ class RecurringPatternSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RecurringPattern
-        fields = ("id", "key", "category", "category_label", "direction", "counterparty_name", "counterparty_inn", "subtype", "label", "period", "day_of_month", "weekday", "amount", "amount_cv", "occurrences", "first_date", "last_date", "confidence", "active", "user_disabled", "history")
+        fields = ("id", "key", "category", "category_label", "direction", "counterparty_name", "counterparty_inn", "subtype", "label", "period", "day_of_month", "weekday", "amount", "amount_cv", "occurrences", "first_date", "last_date", "confidence", "probability", "timing_std_days", "purpose_hint", "active", "user_disabled", "history")
         read_only_fields = tuple(f for f in fields if f != "user_disabled")
 
     def get_category_label(self, obj):

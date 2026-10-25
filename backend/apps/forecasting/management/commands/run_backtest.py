@@ -54,6 +54,9 @@ class Command(LoggedCommand):
             self.stdout.write(self.style.WARNING(warning))
         for m in rec.summary['models']:
             self.stdout.write(f"{m['model']}: MAE={m['mae_balance']}, MSE={m['mse_balance']}, Accuracy={m['gap_accuracy']}, Precision={m['gap_precision']}, Recall={m['gap_recall']}, F1={m['gap_f1']}, Brier={m['brier_score']}; {m['confusion']}")
+            for key, title in (("warning", "предупреждение (P ≥ порога)"), ("early", "ранний сигнал (худшие 10 %)")):
+                w = m["early_warning"][key]
+                self.stdout.write(f"    {title}: сигналов {w['signals']}, верных {w['precision']}; разрывов обнаружено {w['detected']} из {w['episodes']}; упреждение медиана {w['lead_median']} дн., ≥7 дн. у {w['lead_ge7_share']}, ≥14 дн. у {w['lead_ge14_share']}")
         self.stdout.write(self.style.SUCCESS(f"Сохранён бэктест #{rec.id}: {rec.summary['n_forecasts']} прогнозов"))
         if opts['fit_calibration']:
             self._fit_calibration(rec, cfg)

@@ -50,7 +50,8 @@ export type Category = { code: string; label: string; direction: 'in' | 'out'; k
 export type RecurringPattern = {
   id: number; key: string; category: string; category_label: string; direction: string; counterparty_name: string; label: string
   period: string; day_of_month: number | null; weekday: number | null; amount: string; amount_cv: number; occurrences: number
-  first_date: string; last_date: string; confidence: number; active: boolean; user_disabled: boolean; history: { date: string; amount: number }[]
+  first_date: string; last_date: string; confidence: number; probability: number; timing_std_days: number; purpose_hint: string
+  active: boolean; user_disabled: boolean; history: { date: string; amount: number }[]
 }
 
 export type PlannedEvent = {

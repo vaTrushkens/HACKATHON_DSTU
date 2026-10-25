@@ -22,6 +22,9 @@ class RecurringPattern(models.Model):
     first_date = models.DateField()
     last_date = models.DateField()
     confidence = models.FloatField(default=0)
+    probability = models.FloatField(default=1.0)  # доля периодов, в которые платёж действительно прошёл
+    timing_std_days = models.FloatField(default=0.0)  # типичный разброс даты, дней
+    purpose_hint = models.CharField(max_length=64, blank=True)  # сигнатура назначения, если контрагент разделён на несколько платежей
     active = models.BooleanField(default=True)
     user_disabled = models.BooleanField(default=False)  # пользователь отключил («этого платежа больше не будет»)
     history = models.JSONField(default=list)

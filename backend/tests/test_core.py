@@ -131,6 +131,116 @@ def test_detect_recurring_and_project():
     assert all(is_business_day(d) for d in ev.date)
 
 
+def _ops_rows(rows: list[tuple]) -> pd.DataFrame:
+    """Операции с уже проставленной категорией: (дата, сумма, направление, ИНН, имя, назначение, категория)."""
+    out = pd.DataFrame(rows, columns=["operation_date", "amount", "direction", "counterparty_inn", "counterparty_name", "payment_purpose", "category"])
+    out["operation_date"] = pd.to_datetime(out.operation_date)
+    out["operation_id"] = [f"R{i}" for i in range(len(out))]
+    out["balance_eod"] = 1_000_000.0
+    return out
+
+
+def _monthly(day: int, months: int, amount, direction, inn, name, purpose, category, start="2025-06-01") -> list[tuple]:
+    rows = []
+    for m in pd.period_range(start, periods=months, freq="M"):
+        d = shift_to_business_day(pd.Timestamp(year=m.year, month=m.month, day=day), "forward")
+        rows.append((d, amount(m) if callable(amount) else amount, direction, inn, name, purpose(m) if callable(purpose) else purpose, category))
+    return rows
+
+
+MONTHS_RU = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+
+
+def test_recurring_splits_different_payments_of_one_counterparty_by_purpose():
+    # два разных ежемесячных платежа одному банку: группа целиком не периодична, по назначению — два паттерна
+    rows = _monthly(1, 13, 990.0, "Списание", "0068275202", "ПАО «Банк»", lambda m: f"Комиссия за ведение счета за {MONTHS_RU[m.month - 1]} {m.year} г. Без НДС", "BANK_FEES")
+    rows += _monthly(3, 13, 4500.0, "Списание", "0068275202", "ПАО «Банк»", lambda m: f"Плата за аренду POS-терминала за {m.month:02d}.{m.year}. В том числе НДС (22%) 811.48 руб.", "BANK_FEES")
+    pats = detect_recurring(_ops_rows(rows), pd.Timestamp("2026-06-30"))
+    fees = sorted([p for p in pats if p.category == "BANK_FEES"], key=lambda p: p.amount)
+    assert [p.amount for p in fees] == [990.0, 4500.0]
+    assert all(p.period == "monthly" and p.occurrences == 13 and p.probability == 1.0 for p in fees)
+    assert fees[0].purpose_hint != fees[1].purpose_hint and "pos" in fees[1].purpose_hint
+    assert fees[0].key != fees[1].key and fees[0].label != fees[1].label
+    assert fees[0].day_of_month == 1 and fees[1].day_of_month == 3
+
+
+def test_recurring_falls_back_to_amount_clusters_when_purposes_are_unique():
+    # назначения с уникальными словами в каждом платеже: по тексту не сгруппировать, по уровню суммы — два паттерна
+    rows = _monthly(1, 13, 990.0, "Списание", "0068275202", "ПАО «Банк»", lambda m: f"Комиссия за операцию {chr(97 + m.month) * 3}", "BANK_FEES")
+    rows += _monthly(3, 13, 4500.0, "Списание", "0068275202", "ПАО «Банк»", lambda m: f"Плата за операцию {chr(110 + m.month) * 3}", "BANK_FEES")
+    pats = detect_recurring(_ops_rows(rows), pd.Timestamp("2026-06-30"))
+    fees = sorted([p for p in pats if p.category == "BANK_FEES"], key=lambda p: p.amount)
+    assert [p.amount for p in fees] == [990.0, 4500.0]
+    assert [p.key for p in fees] == ["BANK_FEES:0068275202:#amt1", "BANK_FEES:0068275202:#amt2"]
+    assert "₽" in fees[0].label
+
+
+def test_recurring_splits_weekly_cash_deposits_by_weekday():
+    rows = []
+    for week in pd.date_range("2026-01-05", periods=20, freq="7D"):  # понедельники
+        rows.append((week + pd.Timedelta(days=3), 100_000.0, "Поступление", "0063434610", "ООО «Инкассация»", "Взнос наличных. Торговая выручка", "REV_CASH"))
+        rows.append((week + pd.Timedelta(days=4), 20_000.0, "Поступление", "0063434610", "ООО «Инкассация»", "Взнос наличных. Торговая выручка", "REV_CASH"))
+    pats = detect_recurring(_ops_rows(rows), pd.Timestamp("2026-05-25"))
+    by_wd = {p.weekday: p for p in pats if p.category == "REV_CASH"}
+    assert set(by_wd) == {3, 4}
+    assert by_wd[3].amount == 100_000 and by_wd[4].amount == 20_000 and by_wd[3].period == "weekly"
+    assert "четвергам" in by_wd[3].label
+    ev = project(pats, pd.Timestamp("2026-05-26"), pd.Timestamp("2026-06-21"))
+    assert len(ev) == 8 and all(is_business_day(d) for d in ev.date)  # 12 июня — праздник, перенос на рабочий день
+    assert ev.groupby("pattern_key").amount.sum().tolist() == [400_000, 80_000]
+
+
+def test_mandatory_payment_is_detected_from_two_occurrences_only():
+    # компания открылась недавно: два платежа аренды уже дают паттерн (с низкой уверенностью), два платежа за услуги — нет
+    rows = _monthly(10, 2, 150_000.0, "Списание", "0011111111", "ООО «Арендодатель»", "Оплата аренды помещения", "RENT", start="2026-04-01")
+    rows += _monthly(12, 2, 9_000.0, "Списание", "0022222222", "ООО «Клининг»", "Оплата по счету за уборку", "SERVICES", start="2026-04-01")
+    pats = detect_recurring(_ops_rows(rows), pd.Timestamp("2026-05-31"))
+    assert [p.category for p in pats] == ["RENT"]
+    rent = pats[0]
+    assert rent.occurrences == 2 and rent.confidence <= 0.45 and rent.probability == 0.75 and rent.active
+
+
+def test_project_passes_hit_rate_as_probability_and_timing_spread():
+    # подписка оплачивается 10 месяцев из 12 → вероятность ≈ 0.83; зарплата — всегда 1.0
+    rows = [r for i, r in enumerate(_monthly(15, 12, 12_000.0, "Списание", "0033333333", "ООО «Облако»", "Оплата подписки на облачный сервис", "SERVICES")) if i not in (3, 8)]
+    rows += _monthly(10, 12, 400_000.0, "Списание", "0068275202", "ПАО «Банк»", "Перечисление заработной платы (окончательный расчет)", "SALARY")
+    pats = detect_recurring(_ops_rows(rows), pd.Timestamp("2026-05-31"))
+    by_cat = {p.category: p for p in pats}
+    assert by_cat["SERVICES"].probability == pytest.approx(10 / 12, abs=0.01)
+    assert by_cat["SALARY"].probability == 1.0
+    ev = project(pats, pd.Timestamp("2026-06-01"), pd.Timestamp("2026-06-30"))
+    assert {"probability", "timing_std_days"} <= set(ev.columns)
+    assert ev.set_index("category").probability.to_dict() == {"SERVICES": pytest.approx(10 / 12, abs=0.01), "SALARY": 1.0}
+    assert (ev.timing_std_days >= 0).all()
+
+
+def test_salary_with_delay_compensation_stays_in_final_group():
+    purposes = lambda m: f"Перечисление заработной платы (окончательный расчет) за {m.strftime('%B')}" + (" с учетом компенсации за задержку выплаты (ст. 236 ТК РФ)" if m.month in (3, 4) else "")
+    rows = _monthly(15, 12, 300_000.0, "Списание", "0068275202", "ПАО «Банк»", purposes, "SALARY")
+    rows += _monthly(15, 3, 50_000.0, "Списание", "0068275202", "ПАО «Банк»", "Перечисление отпускных", "SALARY", start="2026-01-01")
+    pats = detect_recurring(_ops_rows(rows), pd.Timestamp("2026-05-31"))
+    sal = [p for p in pats if p.category == "SALARY"]
+    assert len(sal) == 1 and sal[0].subtype == "final" and sal[0].occurrences == 12 and sal[0].amount == 300_000
+
+
+def test_next_dates_quarterly_keeps_phase_of_last_payment():
+    from cashflow_core.recurring import RecurringPattern, next_dates
+
+    p = RecurringPattern(key="k", category="SERVICES", direction="Списание", counterparty_name="X", counterparty_inn="", subtype="", period="quarterly", day_of_month=15, weekday=None, amount=1.0, amount_cv=0.0, occurrences=4, last_date=pd.Timestamp("2026-04-15").date(), first_date=pd.Timestamp("2025-07-15").date(), confidence=0.8, active=True)
+    dates = next_dates(p, pd.Timestamp("2026-06-01"), pd.Timestamp("2026-11-30"))
+    assert [d.strftime("%m-%d") for d in dates] == ["07-15", "10-15"]
+
+
+def test_end_of_month_pattern_is_clamped_and_shifted_backward():
+    rows = []
+    for m in pd.period_range("2025-06-01", periods=12, freq="M"):
+        rows.append((shift_to_business_day(m.end_time.normalize(), "backward"), 30_000.0, "Списание", "0044444444", "ООО «Связь»", "Оплата услуг связи", "UTILITIES"))
+    pats = detect_recurring(_ops_rows(rows), pd.Timestamp("2026-05-31"))
+    assert pats[0].day_of_month == 31
+    ev = project(pats, pd.Timestamp("2026-06-01"), pd.Timestamp("2026-08-31"))
+    assert ev.date.tolist() == [shift_to_business_day(pd.Timestamp(d), "backward") for d in ("2026-06-30", "2026-07-31", "2026-08-31")]
+
+
 def test_tax_calendar_uses_28th_shifted_to_business_day():
     ops = _synthetic_ops()
     ops = pd.concat([ops, Categorizer().transform(ops)], axis=1)

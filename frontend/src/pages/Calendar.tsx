@@ -108,17 +108,18 @@ export default function Calendar() {
         <div className="card">
           <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}><h2>Регулярные платежи и поступления, найденные в выписке</h2><button className="secondary" onClick={async () => { await post(`/companies/${company.id}/recurring/`); loadAll() }}>Пересчитать</button></div>
           <table>
-            <thead><tr><th>Платёж</th><th>Периодичность</th><th>День</th><th className="num">Сумма</th><th className="num">Разброс</th><th className="num">Повторов</th><th>Последний</th><th className="num">Уверенность</th><th>Учитывать</th></tr></thead>
+            <thead><tr><th>Платёж</th><th>Периодичность</th><th>День</th><th className="num">Сумма</th><th className="num">Разброс</th><th className="num">Повторов</th><th>Последний</th><th className="num">Вероятность</th><th className="num">Уверенность</th><th>Учитывать</th></tr></thead>
             <tbody>
               {patterns.map((p) => (
                 <tr key={p.id} style={{ opacity: p.active && !p.user_disabled ? 1 : 0.5 }}>
                   <td>{p.label}<div className="small muted">{p.category_label}</div></td>
                   <td>{PERIOD_LABELS[p.period] ?? p.period}</td>
-                  <td>{p.day_of_month ? `${p.day_of_month}-е` : p.weekday !== null ? ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'][p.weekday] : '—'}</td>
+                  <td>{p.day_of_month ? (p.day_of_month >= 31 ? 'конец месяца' : `${p.day_of_month}-е`) : p.weekday !== null ? ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'][p.weekday] : '—'}{p.timing_std_days > 0 && <div className="small muted">±{Math.round(p.timing_std_days)} дн.</div>}</td>
                   <td className={`num ${p.direction === 'Поступление' ? 'pos' : 'neg'}`}>{fmtMoney(p.amount)}</td>
                   <td className="num muted">±{fmtPct(p.amount_cv)}</td>
                   <td className="num">{p.occurrences}</td>
                   <td>{fmtDate(p.last_date)}{!p.active && <div className="small muted">не повторялся — неактивен</div>}</td>
+                  <td className="num">{fmtPct(p.probability)}{p.occurrences < 3 && <div className="small muted">мало повторов</div>}</td>
                   <td className="num"><div className="progress" style={{ width: 60, display: 'inline-block' }}><i style={{ width: `${p.confidence * 100}%` }} /></div></td>
                   <td><input type="checkbox" checked={!p.user_disabled} onChange={() => togglePattern(p)} /></td>
                 </tr>

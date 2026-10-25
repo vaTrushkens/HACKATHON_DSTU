@@ -220,6 +220,23 @@ def test_quality_api_scopes_and_staleness(client_and_company):
     assert client.get('/api/backtest/',{'company_id':company.id}).data['stale'] is True
 
 
+def test_early_warning_lead_time_is_measured_per_gap_episode():
+    base = evaluate_company(categorized(),{'company_id':'test'},{'naive':NaiveMeanModel()},BacktestConfig(n_paths=30),cutoffs=[pd.Timestamp('2026-06-01')])[0]
+    assert {'early_signal','opening_below'} <= set(base.extras)
+    mk = lambda cutoff, gap_date, predicted, early, opening_below=False: replace(base, cutoff=cutoff, actual_gap=gap_date is not None, actual_gap_date=gap_date, predicted_gap=predicted, gap_prob=1. if predicted else 0., extras={**base.extras, 'early_signal': early, 'opening_below': opening_below})
+    rows = [
+        mk('2026-06-01','2026-06-20',False,True),   # ранний сигнал за 19 дней, предупреждения ещё нет
+        mk('2026-06-15','2026-06-20',True,True),    # предупреждение за 5 дней
+        mk('2026-06-22','2026-06-22',True,True,opening_below=True),  # остаток уже ниже порога — не считается
+        mk('2026-07-01',None,True,True),            # ложная тревога обоих сигналов
+        mk('2026-07-15',None,False,False),
+    ]
+    ew = summarize(rows)['models'][0]['early_warning']
+    assert ew['warning'] == {'signals':2,'true_alarms':1,'precision':.5,'episodes':1,'detected':1,'detected_share':1.,'lead_median':5.,'lead_mean':5.,'lead_ge7_share':0.,'lead_ge14_share':0.}
+    assert ew['early']['signals'] == 3 and ew['early']['precision'] == pytest.approx(2/3, abs=1e-3) and ew['early']['lead_median'] == 19. and ew['early']['lead_ge14_share'] == 1.
+    json.dumps(summarize(rows), allow_nan=False)
+
+
 def test_rare_category_does_not_crash_training():
     raw = _synthetic_ops().iloc[:60].copy(); raw['direction'] = 'Списание'
     cat = MLCategorizer().fit(raw,pd.Series(['SALARY']*59+['RENT']),pd.Series([.95]*60))

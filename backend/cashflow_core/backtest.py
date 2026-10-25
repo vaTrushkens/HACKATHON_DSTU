@@ -146,6 +146,9 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
             pred_dates = res.daily.index[prob_below >= 0.5]
             pred_date = pred_dates[0] if len(pred_dates) else None
             lead = int((actual_gap_date - cutoff).days) if (actual_gap and predicted_gap) else None
+            # ранний сигнал: первый день, когда худшие 10 % траекторий уходят ниже порога (как в карточке риска)
+            early_dates = res.daily.index[res.daily.p10.values < cfg.min_balance]
+            early_date = early_dates[0] if len(early_dates) else None
             # ошибка на коротких горизонтах: там модель должна выигрывать у «остаток не изменится»
             by_h = {}
             for h in SHORT_HORIZONS:
@@ -172,7 +175,9 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
                     lead_days=lead,
                     mse_balance=round(float(np.square(actual.values - p50).mean()), 2),
                     naive_mae_ratio=round(mae / naive_mae, 4) if naive_mae > 0 else None,
-                    extras={"date_err_days": int((pred_date - actual_gap_date).days) if (pred_date is not None and actual_gap_date is not None) else None, "raw_gap_prob": round(raw_prob, 3), **by_h},
+                    extras={"date_err_days": int((pred_date - actual_gap_date).days) if (pred_date is not None and actual_gap_date is not None) else None, "raw_gap_prob": round(raw_prob, 3),
+                            "early_signal": early_date is not None, "early_signal_date": str(early_date.date()) if early_date is not None else None,
+                            "opening_balance": round(opening, 2), "opening_below": bool(opening < cfg.min_balance), **by_h},
                 )
             )
     return rows
@@ -187,6 +192,44 @@ def _by_horizon(g: pd.DataFrame) -> list[dict]:
         if len(mae):
             out.append({"h": h, "mae_norm_median": round(float(mae.median()), 4), "naive_mae_ratio_median": round(float(ratio.median()), 4) if len(ratio) else None})
     out.append({"h": "full", "mae_norm_median": round(float(g.mae_norm.median()), 4), "naive_mae_ratio_median": round(float(g.naive_mae_ratio.dropna().median()), 4) if g.naive_mae_ratio.notna().any() else None})
+    return out
+
+
+def early_warning_stats(g: pd.DataFrame) -> dict:
+    """Заблаговременность сигналов о разрыве.
+
+    Два сигнала: «предупреждение» — вероятность разрыва ≥ порога (как уровень риска в карточке),
+    «ранний сигнал» — худшие 10 % траекторий уходят ниже порога (дата и сумма «в плохом случае»).
+    Для каждого фактического разрыва (компания + первый день ниже порога) упреждение — число дней
+    от самого раннего среза, на котором сигнал сработал, до дня разрыва. Срезы, где остаток уже
+    ниже порога, не считаются: там предупреждать поздно. Упреждение ограничено горизонтом прогноза
+    и шагом срезов.
+    """
+    ex = g.extras
+    early = ex.map(lambda e: bool(e.get("early_signal", False))).astype(bool)
+    opening_below = ex.map(lambda e: bool(e.get("opening_below", False))).astype(bool)
+    lead = (pd.to_datetime(g.actual_gap_date) - pd.to_datetime(g.cutoff)).dt.days
+    out = {}
+    for name, fired in (("warning", g.predicted_gap.astype(bool)), ("early", early)):
+        fired = fired & ~opening_below
+        n_fired = int(fired.sum())
+        true_alarms = int((fired & g.actual_gap).sum())
+        episodes: dict[tuple, float] = {}
+        for key, d in g[g.actual_gap & ~opening_below].assign(lead=lead, fired=fired).groupby(["company_id", "actual_gap_date"]):
+            episodes[key] = float(d.lead[d.fired].max()) if d.fired.any() else np.nan
+        det = pd.Series(list(episodes.values()), dtype=float).dropna()
+        out[name] = {
+            "signals": n_fired,
+            "true_alarms": true_alarms,
+            "precision": round(true_alarms / n_fired, 3) if n_fired else None,
+            "episodes": len(episodes),
+            "detected": int(len(det)),
+            "detected_share": round(len(det) / len(episodes), 3) if episodes else None,
+            "lead_median": float(det.median()) if len(det) else None,
+            "lead_mean": round(float(det.mean()), 1) if len(det) else None,
+            "lead_ge7_share": round(float((det >= 7).mean()), 3) if len(det) else None,
+            "lead_ge14_share": round(float((det >= 14).mean()), 3) if len(det) else None,
+        }
     return out
 
 
@@ -229,6 +272,7 @@ def summarize(rows: list[BacktestRow]) -> dict:
                 "date_err_days_mae": round(float(g.date_err_days.dropna().abs().mean()), 1) if g.date_err_days.notna().any() else None,
                 "calibration": [{"bin": str(r.gap_prob), "actual_rate": round(float(r["mean"]), 3), "n": int(r["size"])} for _, r in calib.iterrows()],
                 "by_horizon": _by_horizon(g),
+                "early_warning": early_warning_stats(g),
             }
         )
     by_ind = (

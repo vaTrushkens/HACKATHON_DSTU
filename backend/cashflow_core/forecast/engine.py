@@ -33,7 +33,7 @@ from .reconcile import reconcile_events, residual_means
 
 EVENT_COLS = ["date", "amount", "direction", "category", "label", "counterparty_name", "counterparty_inn", "source", "confidence", "pattern_key", "external_ref", "obligation_key"]
 MIN_HISTORY_FOR_MODEL = 60
-ENGINE_VERSION = "2"
+ENGINE_VERSION = "3"  # 3: регулярности с вероятностью и разбросом срока, разделение платежей по назначению/дню недели
 _STOCH_CACHE = OrderedDict()
 
 
