@@ -20,7 +20,7 @@ export type ForecastEvent = {
 export type Forecast = {
   as_of: string; opening_balance: number; model: string; scenario: any; min_balance: number
   daily: DailyPoint[]; events: ForecastEvent[]; data_quality: { level: string; history_days: number; stale_days: number | null; notes: string[] }
-  components: Record<string, number>
+  components: Record<string, any>  // числа + probability_kind: 'uncalibrated_monte_carlo' | 'calibrated', calibration: {...}
   calculation_log?: { step: number; title: string; [key: string]: any }[]
 }
 

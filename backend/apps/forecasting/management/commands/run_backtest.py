@@ -28,6 +28,8 @@ class Command(BaseCommand):
         parser.add_argument("--company", help="Код компании в базе")
         parser.add_argument("--dataset", help="UUID импортированного набора")
         parser.add_argument("--actual-mode", choices=['actual', 'without_financing'], default='actual')
+        parser.add_argument("--fit-calibration", action="store_true", help="По результатам этого прогона обучить калибровку вероятности и сохранить в models_store (запускайте на периоде ДО тестового)")
+        parser.add_argument("--no-calibration", action="store_true", help="Не применять сохранённую калибровку (сырые вероятности Монте-Карло)")
 
     def handle(self, *args, **opts):
         companies = Company.objects.order_by('code')
@@ -43,11 +45,31 @@ class Command(BaseCommand):
         try:
             cfg = BacktestConfig(horizon=opts['horizon'], cutoffs_every_days=opts['every'], test_start=opts['test_start'], test_end=opts['test_end'], n_paths=opts['paths'], actual_mode=opts['actual_mode'])
             rec = evaluate(companies, cfg, [s.strip() for s in opts['models'].split(',')], opts['name'],
-                progress=lambda i,n,r,t: self.stdout.write(f'{i}/{n} компаний; {r} прогнозов; {t:.0f} с'))
+                progress=lambda i,n,r,t: self.stdout.write(f'{i}/{n} компаний; {r} прогнозов; {t:.0f} с'),
+                calibrator=None if (opts['fit_calibration'] or opts['no_calibration']) else "auto")
         except (ValueError, KeyError) as exc:
             raise CommandError(str(exc)) from exc
         for warning in rec.config['warnings']:
             self.stdout.write(self.style.WARNING(warning))
         for m in rec.summary['models']:
-            self.stdout.write(f"{m['model']}: MAE={m['mae_balance']}, MSE={m['mse_balance']}, Accuracy={m['gap_accuracy']}, Precision={m['gap_precision']}, Recall={m['gap_recall']}, F1={m['gap_f1']}; {m['confusion']}")
+            self.stdout.write(f"{m['model']}: MAE={m['mae_balance']}, MSE={m['mse_balance']}, Accuracy={m['gap_accuracy']}, Precision={m['gap_precision']}, Recall={m['gap_recall']}, F1={m['gap_f1']}, Brier={m['brier_score']}; {m['confusion']}")
         self.stdout.write(self.style.SUCCESS(f"Сохранён бэктест #{rec.id}: {rec.summary['n_forecasts']} прогнозов"))
+        if opts['fit_calibration']:
+            self._fit_calibration(rec, cfg)
+
+    def _fit_calibration(self, rec, cfg):
+        """Калибровка по модели, которую использует сервис (hgb, если обучена, иначе seasonal_naive)."""
+        from apps.forecasting import services as fc_services
+        from cashflow_core.calibration import ProbabilityCalibrator
+        live = fc_services.get_flow_model().name
+        rows = [r for r in rec.rows if r['model'] == live]
+        if not rows:
+            raise CommandError(f"В прогоне нет результатов модели «{live}», которой пользуется сервис")
+        try:
+            cal = ProbabilityCalibrator.fit([r['gap_prob'] for r in rows], [r['actual_gap'] for r in rows],
+                {"flow_model": live, "test_start": cfg.test_start, "test_end": cfg.test_end, "backtest_id": rec.id})
+        except ValueError as exc:
+            raise CommandError(str(exc)) from exc
+        cal.save(str(fc_services.CALIBRATION_PATH))
+        fc_services.reset_model_cache()
+        self.stdout.write(self.style.SUCCESS(f"Калибровка сохранена → {fc_services.CALIBRATION_PATH}: Brier {cal.info['brier_raw']} → {cal.info['brier_calibrated']} на {cal.info['samples']} срезах"))

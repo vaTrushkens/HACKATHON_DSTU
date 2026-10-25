@@ -57,6 +57,8 @@ def assess(res: ForecastResult, overdue_events: pd.DataFrame | None = None, dela
     thr = res.min_balance
     paths = res.paths
     prob_any = float((paths.min(axis=1) < thr).mean())
+    if res.components.get("probability_kind") == "calibrated":  # см. calibration.apply_to_result
+        prob_any = float(res.components["prob_gap_any_day"])
     first_p50 = daily.index[daily.prob_below >= P_DATE]
     first_p10 = daily.index[daily.p10 < thr]
     gap_date = first_p50[0] if len(first_p50) else None

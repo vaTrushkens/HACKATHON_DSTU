@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from ..calendar_ru import is_business_day
-from ..categories import FIXED_CODES
+from ..categories import FIXED_CODES, VARIABLE_CODES
 from ..recurring import RecurringPattern, project
 from ..taxes import tax_calendar
 from .models import FlowModel, SeasonalNaiveModel
@@ -165,10 +165,13 @@ def run_forecast(inp: ForecastInputs, model: FlowModel | None = None, n_paths: i
     mean_in = means.inflow_mean.values * rev_mult
     mean_out = means.outflow_mean.values
     bd = means.is_business_day.values
+    delayed_share = 0.0
+    if inp.scenario.delay_client_days:
+        mean_in, delayed_share = _delay_client_inflows(ops, mean_in, bd, as_of, inp.scenario.delay_client_days, inp.scenario.delay_client_key)
 
     stoch_in = mean_in[None, :] * factors_in
     stoch_out = mean_out[None, :] * factors_out + fixed_residual_daily * bd[None, :]
-    trace.extend([{"step": 3, "title": "Согласование событий", "events": len(events), "replaced_inferred": replaced, "removed_statistical_in": covered['in'], "removed_statistical_out": covered['out'], "fixed_residual_daily": round(fixed_residual_daily, 2), "residual_mean_in_total": round(float(mean_in.sum()), 2), "residual_mean_out_total": round(float(mean_out.sum()), 2)},
+    trace.extend([{"step": 3, "title": "Согласование событий", "events": len(events), "replaced_inferred": replaced, "removed_statistical_in": covered['in'], "removed_statistical_out": covered['out'], "fixed_residual_daily": round(fixed_residual_daily, 2), "residual_mean_in_total": round(float(mean_in.sum()), 2), "residual_mean_out_total": round(float(mean_out.sum()), 2), "delayed_client_share": round(delayed_share, 3)},
                   {"step": 4, "title": "Статистическая модель", "model": model_name, "train_info": getattr(model, 'train_info', {}), "industry_profile": inp.industry_profile, "reused_statistical_layer": cache_hit},
                   {"step": 5, "title": "Монте-Карло", "paths": n_paths, "seed": seed, "horizon_days": H, "level_sigma": round(level_sigma, 4)}])
 
@@ -230,6 +233,39 @@ def run_forecast(inp: ForecastInputs, model: FlowModel | None = None, n_paths: i
 
 
 # ---------------------------------------------------------------------------
+CLIENT_CODES = ("REV_CLIENTS", "REV_MARKETPLACE")
+
+
+def _delay_client_inflows(ops: pd.DataFrame, mean_in: np.ndarray, bd: np.ndarray, as_of: pd.Timestamp, days: int, key: str | None) -> tuple[np.ndarray, float]:
+    """Сценарий «клиент заплатит позже» для статистического слоя.
+
+    Доля оплат клиентов (или одного клиента по ``key``) в операционных поступлениях
+    за последние 91 день сдвигается на ``days`` вперёд; что уходит за горизонт — не приходит.
+    Сдвинутая сумма ложится на ближайший рабочий день.
+    """
+    recent = ops[(ops.operation_date > as_of - pd.Timedelta(days=91)) & (ops.direction == "Поступление")]
+    total = float(recent[recent.category.isin(VARIABLE_CODES)].amount.sum())
+    if total <= 0:
+        return mean_in, 0.0
+    clients = recent[recent.category.isin(CLIENT_CODES)]
+    if key:
+        k = str(key).lower()
+        clients = clients[(clients.counterparty_inn.astype(str) == str(key)) | clients.counterparty_name.fillna("").str.lower().str.contains(k, regex=False)]
+    share = min(float(clients.amount.sum()) / total, 1.0)
+    if share <= 0:
+        return mean_in, 0.0
+    moved = mean_in * share
+    out = mean_in * (1 - share)
+    H = len(out)
+    for i in np.nonzero(moved)[0]:
+        j = i + int(days)
+        while j < H and not bd[j]:
+            j += 1
+        if j < H:
+            out[j] += moved[i]
+    return out, share
+
+
 def _dispersion(daily: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, float]:
     """Эмпирические отношения факт/база для бутстрапа и сигма уровневого шока."""
     if daily.empty or len(daily) < 20:

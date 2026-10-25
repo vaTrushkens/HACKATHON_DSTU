@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -13,8 +15,17 @@ PROJECT_DIR = BASE_DIR.parent
 load_dotenv(PROJECT_DIR / ".env")
 load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-insecure-key-change-me")
-DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
+# Под pytest настройки импортируются до conftest, поэтому тестовая БД выбирается здесь:
+# SQLite по умолчанию, чтобы тесты шли без PostgreSQL; TEST_DATABASE_URL переопределяет.
+RUNNING_TESTS = "pytest" in sys.modules
+
+DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
+SECRET_KEY = "test-secret-key-for-pytest-only-0123456789abcdef" if RUNNING_TESTS else os.getenv("DJANGO_SECRET_KEY", "")
+if not SECRET_KEY:
+    if DEBUG or RUNNING_TESTS:
+        SECRET_KEY = "dev-only-insecure-key-change-me-before-deploy-0123456789"  # ≥ 32 байт для HMAC-SHA256
+    else:
+        raise ImproperlyConfigured("Задайте DJANGO_SECRET_KEY: без DEBUG сервис не стартует с ключом по умолчанию")
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
 
 INSTALLED_APPS = [
@@ -61,12 +72,15 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 # PostgreSQL — основная БД. DATABASE_URL=postgres://user:pass@host:5432/db
 # Для локальных тестов без Postgres можно указать DATABASE_URL=sqlite:///db.sqlite3
-DATABASES = {
-    "default": dj_database_url.config(
-        default=os.getenv("DATABASE_URL", "postgres://cashflow:cashflow@localhost:5432/cashflow"),
-        conn_max_age=600,
-    )
-}
+if RUNNING_TESTS:
+    DATABASES = {"default": dj_database_url.parse(os.getenv("TEST_DATABASE_URL", f"sqlite:///{BASE_DIR / 'test_db.sqlite3'}"))}
+else:
+    DATABASES = {
+        "default": dj_database_url.config(
+            default=os.getenv("DATABASE_URL", "postgres://cashflow:cashflow@localhost:5432/cashflow"),
+            conn_max_age=600,
+        )
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 8}},

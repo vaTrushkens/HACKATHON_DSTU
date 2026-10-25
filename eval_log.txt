@@ -1,3 +1,0 @@
-rules_only           acc=0.990 macroF1=0.881 errors=3
-rules_counterparty   acc=1.000 macroF1=1.000 errors=0
-full_pipeline        acc=1.000 macroF1=1.000 errors=0

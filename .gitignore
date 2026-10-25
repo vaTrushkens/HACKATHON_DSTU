@@ -9,3 +9,9 @@ frontend/dist/
 .pytest_cache/
 .vscode/
 .idea/
+
+# рабочие логи и кэш сборки
+*_log.txt
+server_err.txt
+*.tsbuildinfo
+backend/test_db.sqlite3

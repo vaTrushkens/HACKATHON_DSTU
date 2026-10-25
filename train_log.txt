@@ -1,5 +1,0 @@
-Операций в базе: 222399, компаний: 150
-Категоризатор обучен за 59s: {'in': {'train_rows': 85408, 'test_rows': 21352, 'accuracy': 1.0, 'macro_f1': 1.0, 'classes': ['LOAN_IN', 'OWNER_IN', 'REFUND_IN', 'REV_ACQUIRING', 'REV_CASH', 'REV_MARKETPLACE']}, 'out': {'train_rows': 38966, 'test_rows': 9742, 'accuracy': 1.0, 'macro_f1': 1.0, 'classes': ['BANK_FEES', 'CONTRACTORS', 'FINES', 'LOAN_OUT', 'MARKETING', 'OWNER_OUT', 'RENT', 'SALARY', 'SERVICES', 'SUPPLIERS', 'TAXES', 'UTILITIES']}}
-Пересчитано категорий: 222399
-Обучающая панель: 104340 строк
-Модель потоков обучена за 26s → C:\Users\User\Desktop\хакатон 24.10\hcktn\backend\models_store\flow_hgb.joblib

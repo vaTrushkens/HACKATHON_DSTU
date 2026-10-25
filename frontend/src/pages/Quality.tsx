@@ -58,6 +58,11 @@ export default function Quality() {
           <tbody>{models.map(m => <tr key={m.model}><td>{LABELS[m.model] ?? m.model}</td><td>{m.n}</td><td>{number(m.mae_balance)}</td><td>{number(m.mse_balance)}</td><td>{number(m.rmse_balance)}</td><td>{fmtPct(m.mae_norm_median, 1)}</td><td>{number(m.mase_median)}</td><td>{number(m.naive_mae_ratio_median)}</td><td>{fmtPct(m.gap_accuracy, 1)}</td><td>{fmtPct(m.gap_precision)}</td><td>{fmtPct(m.gap_recall)}</td><td>{m.gap_f1 ?? '—'}</td></tr>)}</tbody></table>
         <p className="small muted">MASE нормирует ошибку на среднее абсолютное дневное изменение остатка в обучающей истории. Столбец «К постоянному остатку» сравнивает MAE с прогнозом неизменного остатка на том же горизонте: меньше 1 — лучше. MAE, MSE и RMSE усредняются по всем дням и срезам; нормированные ошибки представлены медианой по срезам.</p>
       </div>
+      {best.by_horizon && <div className="card"><h2>Ошибка по горизонтам: {LABELS[best.model]}</h2>
+        <table><thead><tr><th>Горизонт</th><th className="num">MAE / оборот</th><th className="num">К постоянному остатку</th></tr></thead>
+          <tbody>{best.by_horizon.map((b: any) => <tr key={String(b.h)}><td>{b.h === 'full' ? `${data.summary.horizon} дней` : `${b.h} дней`}</td><td className="num">{fmtPct(b.mae_norm_median, 1)}</td><td className={`num ${b.naive_mae_ratio_median != null && b.naive_mae_ratio_median < 1 ? 'pos' : ''}`}>{number(b.naive_mae_ratio_median)}</td></tr>)}</tbody></table>
+        <p className="small muted">Ближайшие дни важнее для решения о платежах: здесь видно, на каком горизонте модель выигрывает у гипотезы «остаток не изменится».</p>
+      </div>}
       <div className="grid grid-2">
         <div className="card"><h2>Матрица ошибок: {LABELS[best.model]}</h2>
           <table><thead><tr><th>Факт / прогноз</th><th>Разрыв</th><th>Нет разрыва</th></tr></thead><tbody>
@@ -65,7 +70,7 @@ export default function Quality() {
             <tr><th>Нет разрыва</th><td>FP: {best.confusion.fp}</td><td>TN: {best.confusion.tn}</td></tr></tbody></table>
           <p>Доля фактических разрывов: {fmtPct(data.summary.actual_gap_rate)}. Упреждение верно обнаруженных разрывов: {best.lead_days_mean ?? '—'} дн. Ошибка даты: {best.date_err_days_mae ?? '—'} дн.</p>
         </div>
-        <div className="card"><h2>Проверка вероятностей</h2><p className="small muted">Вероятности получены симуляцией. Таблица показывает, насколько они согласуются с фактом; автоматическая калибровка на этом тестовом наборе не применяется. Brier score: {best.brier_score} (меньше — лучше).</p>
+        <div className="card"><h2>Проверка вероятностей</h2><p className="small muted">{data.config.calibration ? `Вероятности откалиброваны по истории до ${data.config.calibration.test_end} (${data.config.calibration.samples} срезов).` : 'Вероятности — сырой результат симуляции, калибровка не обучена.'} Таблица показывает, насколько они согласуются с фактом. Brier score: {best.brier_score} (меньше — лучше).</p>
           <table><thead><tr><th>Вероятность</th><th>Доля разрывов</th><th>Случаев</th></tr></thead><tbody>{best.calibration.map((c: any) => <tr key={c.bin}><td>{c.bin}</td><td>{fmtPct(c.actual_rate)}</td><td>{c.n}</td></tr>)}</tbody></table>
         </div>
       </div>

@@ -8,16 +8,23 @@ from cashflow_core.backtest import BacktestRow, evaluate_company, summarize
 from cashflow_core.forecast import get_model
 from cashflow_core.forecast.engine import ENGINE_VERSION
 from .models import BacktestResult
-from .services import get_flow_model
+from .services import get_calibrator, get_flow_model
 
 
 def fingerprint(frame):
     return hashlib.sha256(pd.util.hash_pandas_object(frame, index=False).values.tobytes()).hexdigest()
 
 
-def evaluate(companies, cfg, model_names=("naive", "seasonal_naive", "hgb"), name="control_dataset", progress=None):
+def evaluate(companies, cfg, model_names=("naive", "seasonal_naive", "hgb"), name="control_dataset", progress=None, calibrator="auto"):
+    """``calibrator``: "auto" — применить сохранённую калибровку, если она есть; None — сырые вероятности."""
     started = time.monotonic()
     models, warnings = {}, []
+    if calibrator == "auto":
+        calibrator = get_calibrator()
+    if calibrator is not None:
+        fitted_until = calibrator.info.get("test_end")
+        if fitted_until and pd.Timestamp(fitted_until) >= pd.Timestamp(cfg.test_start):
+            warnings.append(f"Калибровка обучена на периоде до {fitted_until}, который пересекается с проверяемым: метрики разрывов оптимистичны")
     for key in model_names:
         if key == "hgb":
             model = get_flow_model()
@@ -34,7 +41,7 @@ def evaluate(companies, cfg, model_names=("naive", "seasonal_naive", "hgb"), nam
     for i, company in enumerate(companies, 1):
         frame = ops_frame(company)
         sources.append({"id": company.id, "code": company.code, "dataset_id": str(company.dataset_id or ''), "rows": len(frame), "sha256": fingerprint(frame)})
-        result = evaluate_company(frame, {"company_id": company.code, "industry": company.industry, "legal_form": company.legal_form}, models, cfg)
+        result = evaluate_company(frame, {"company_id": company.code, "industry": company.industry, "legal_form": company.legal_form}, models, cfg, calibrator=calibrator)
         rows.extend(result)
         if not result:
             warnings.append(f"{company.code}: недостаточно истории и факта для полного горизонта")
@@ -44,7 +51,8 @@ def evaluate(companies, cfg, model_names=("naive", "seasonal_naive", "hgb"), nam
     summary["horizon"] = cfg.horizon
     return BacktestResult.objects.create(name=name[:64], config={**asdict(cfg), "engine_version": ENGINE_VERSION,
         "sources": sources, "warnings": warnings, "duration_seconds": round(time.monotonic() - started, 2),
-        "categorization": "rules_and_counterparty_on_history_only", "models": {k: getattr(m, 'train_info', {}) for k,m in models.items()}},
+        "categorization": "rules_and_counterparty_on_history_only", "models": {k: getattr(m, 'train_info', {}) for k,m in models.items()},
+        "calibration": calibrator.info if calibrator is not None else None},
         summary=summary, rows=[asdict(r) for r in rows])
 
 

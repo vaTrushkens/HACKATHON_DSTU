@@ -24,6 +24,25 @@ from .models import BacktestResult, ForecastPoint, ForecastRun
 
 log = logging.getLogger(__name__)
 FLOW_MODEL_PATH = settings.MODELS_DIR / "flow_hgb.joblib"
+CALIBRATION_PATH = settings.MODELS_DIR / "calibration.joblib"
+
+
+def get_calibrator():
+    """Калибровка вероятности, если обучена командой run_backtest --fit-calibration; иначе None."""
+    stamp = CALIBRATION_PATH.stat().st_mtime_ns if CALIBRATION_PATH.exists() else None
+    return _load_calibrator(stamp)
+
+
+@lru_cache(maxsize=1)
+def _load_calibrator(stamp):
+    if stamp is None:
+        return None
+    from cashflow_core.calibration import ProbabilityCalibrator
+    try:
+        return ProbabilityCalibrator.load(str(CALIBRATION_PATH))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("calibration load failed: %s", type(exc).__name__)
+        return None
 
 
 def get_flow_model() -> FlowModel:
@@ -44,6 +63,7 @@ def _load_flow_model(stamp) -> FlowModel:
 
 def reset_model_cache() -> None:
     _load_flow_model.cache_clear()
+    _load_calibrator.cache_clear()
 
 
 def resolve_as_of(company: Company, as_of=None) -> pd.Timestamp:
@@ -127,6 +147,10 @@ def run(company: Company, as_of=None, horizon: int | None = None, scenario: dict
     if selected.name == 'hgb' and (not until or pd.Timestamp(until) > as_of):
         selected = get_model('seasonal_naive')
     res = run_forecast(inp, selected, n_paths=settings.FORECAST_N_PATHS)
+    calibrator = get_calibrator()
+    if calibrator is not None:
+        from cashflow_core.calibration import apply_to_result
+        apply_to_result(res, calibrator)
     res.calculation_log[0]['last_import_report'] = ops_services.last_ingest_report(company)
     delays = counterparty_payment_delays(ops[ops.operation_date <= as_of]) if len(ops) else None
     overdue = inp.planned_events.copy()
@@ -141,10 +165,16 @@ def run(company: Company, as_of=None, horizon: int | None = None, scenario: dict
 
 @transaction.atomic
 def _save_run(company: Company, res, assessment, is_baseline: bool) -> int:
+    # Повторный запрос с теми же входами (та же выписка, те же события и параметры) снапшот не плодит.
+    events = res.to_dict()["events"]
+    digest = res.calculation_log[0].get("data_sha256") if res.calculation_log else None
+    last = ForecastRun.objects.filter(company=company, is_baseline=is_baseline, as_of=res.as_of.date(), horizon_days=len(res.daily), model_name=res.model_name, min_balance=Decimal(str(res.min_balance))).order_by("-created_at").first()
+    if last and digest and last.calculation_log and last.calculation_log[0].get("data_sha256") == digest and last.events == events and last.scenario == res.scenario.as_dict():
+        return last.id
     run_obj = ForecastRun.objects.create(
         company=company, as_of=res.as_of.date(), horizon_days=len(res.daily), model_name=res.model_name, is_baseline=is_baseline,
         scenario=res.scenario.as_dict(), min_balance=Decimal(str(res.min_balance)), opening_balance=Decimal(str(round(res.opening_balance, 2))),
-        components=res.components, data_quality=res.data_quality, risk=assessment.as_dict(), events=res.to_dict()["events"], calculation_log=res.calculation_log,
+        components=res.components, data_quality=res.data_quality, risk=assessment.as_dict(), events=events, calculation_log=res.calculation_log,
     )
     pts = [ForecastPoint(run=run_obj, date=d.date(), p10=float(r.p10), p50=float(r.p50), p90=float(r.p90), mean=float(r["mean"]), prob_below=float(r.prob_below), det_in=float(r.det_in), det_out=float(r.det_out), stoch_in=float(r.stoch_in), stoch_out=float(r.stoch_out)) for d, r in res.daily.iterrows()]
     ForecastPoint.objects.bulk_create(pts, batch_size=500)

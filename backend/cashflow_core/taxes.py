@@ -16,8 +16,7 @@ import pandas as pd
 from .calendar_ru import nth_day_of_month, shift_to_business_day
 
 ENP_DAY = 28
-QUARTER_MONTHS = {1, 4, 7, 10}  # авансы УСН / НДС по кварталам
-ANNUAL_MONTHS = {3, 4}  # годовой УСН: ООО до 28.03, ИП до 28.04
+QUARTER_MONTHS = {1, 4, 7, 10}  # авансы УСН / НДС по кварталам; годовой УСН (март/апрель) учитывается через «как год назад»
 
 _VAT_RE = re.compile(r"в т\.?\s?ч\.? ндс|в том числе ндс|ндс \d{1,2}\s?%|ндс-?\s?\d{1,2}%")
 

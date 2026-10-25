@@ -75,7 +75,12 @@ def counterfactual_actual(ops: pd.DataFrame, cutoff: pd.Timestamp, horizon_idx: 
     return bal.reindex(horizon_idx) - fin_cum
 
 
-def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel], cfg: BacktestConfig, cutoffs: list[pd.Timestamp] | None = None) -> list[BacktestRow]:
+SHORT_HORIZONS = (7, 14)
+
+
+def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel], cfg: BacktestConfig, cutoffs: list[pd.Timestamp] | None = None, calibrator=None) -> list[BacktestRow]:
+    """``calibrator`` — необязательное отображение сырой вероятности Монте-Карло в калиброванную
+    (см. ``calibration.py``); метрики разрывов считаются по калиброванной вероятности."""
     rows: list[BacktestRow] = []
     if ops.empty:
         return rows
@@ -130,11 +135,24 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
             err = np.abs(actual.values - p50)
             mae = float(err.mean())
             cover = float(((actual.values >= res.daily.p10.values) & (actual.values <= res.daily.p90.values)).mean())
-            gap_prob = float(res.components["prob_gap_any_day"])
+            raw_prob = float(res.components["prob_gap_any_day"])
+            prob_below = res.daily.prob_below.values
+            if calibrator is not None:
+                gap_prob = float(calibrator(raw_prob))
+                prob_below = calibrator(prob_below)
+            else:
+                gap_prob = raw_prob
             predicted_gap = gap_prob >= cfg.gap_prob_threshold
-            pred_dates = res.daily.index[res.daily.prob_below >= 0.5]
+            pred_dates = res.daily.index[prob_below >= 0.5]
             pred_date = pred_dates[0] if len(pred_dates) else None
             lead = int((actual_gap_date - cutoff).days) if (actual_gap and predicted_gap) else None
+            # ошибка на коротких горизонтах: там модель должна выигрывать у «остаток не изменится»
+            by_h = {}
+            for h in SHORT_HORIZONS:
+                if h < len(err):
+                    naive_h = float(np.abs(actual.values[:h] - opening).mean())
+                    by_h[f"mae_norm_h{h}"] = round(float(err[:h].mean()) / monthly_turnover, 4)
+                    by_h[f"naive_mae_ratio_h{h}"] = round(float(err[:h].mean()) / naive_h, 4) if naive_h > 0 else None
             rows.append(
                 BacktestRow(
                     company_id=meta.get("company_id", ""),
@@ -154,10 +172,22 @@ def evaluate_company(ops: pd.DataFrame, meta: dict, models: dict[str, FlowModel]
                     lead_days=lead,
                     mse_balance=round(float(np.square(actual.values - p50).mean()), 2),
                     naive_mae_ratio=round(mae / naive_mae, 4) if naive_mae > 0 else None,
-                    extras={"date_err_days": int((pred_date - actual_gap_date).days) if (pred_date is not None and actual_gap_date is not None) else None},
+                    extras={"date_err_days": int((pred_date - actual_gap_date).days) if (pred_date is not None and actual_gap_date is not None) else None, "raw_gap_prob": round(raw_prob, 3), **by_h},
                 )
             )
     return rows
+
+
+def _by_horizon(g: pd.DataFrame) -> list[dict]:
+    """Медианы MAE/оборот и отношения к «постоянному остатку» на 7, 14 днях и на полном горизонте."""
+    out = []
+    for h in SHORT_HORIZONS:
+        mae = g.extras.map(lambda e: e.get(f"mae_norm_h{h}")).dropna()
+        ratio = g.extras.map(lambda e: e.get(f"naive_mae_ratio_h{h}")).dropna()
+        if len(mae):
+            out.append({"h": h, "mae_norm_median": round(float(mae.median()), 4), "naive_mae_ratio_median": round(float(ratio.median()), 4) if len(ratio) else None})
+    out.append({"h": "full", "mae_norm_median": round(float(g.mae_norm.median()), 4), "naive_mae_ratio_median": round(float(g.naive_mae_ratio.dropna().median()), 4) if g.naive_mae_ratio.notna().any() else None})
+    return out
 
 
 def summarize(rows: list[BacktestRow]) -> dict:
@@ -198,6 +228,7 @@ def summarize(rows: list[BacktestRow]) -> dict:
                 "lead_days_mean": round(float(g.lead_days.dropna().mean()), 1) if g.lead_days.notna().any() else None,
                 "date_err_days_mae": round(float(g.date_err_days.dropna().abs().mean()), 1) if g.date_err_days.notna().any() else None,
                 "calibration": [{"bin": str(r.gap_prob), "actual_rate": round(float(r["mean"]), 3), "n": int(r["size"])} for _, r in calib.iterrows()],
+                "by_horizon": _by_horizon(g),
             }
         )
     by_ind = (
